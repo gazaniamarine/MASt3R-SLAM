@@ -156,6 +156,11 @@ if __name__ == "__main__":
     parser.add_argument("--save-as", default="default")
     parser.add_argument("--no-viz", action="store_true")
     parser.add_argument("--calib", default="")
+    parser.add_argument(
+        "--export-fact3r",
+        action="store_true",
+        help="export posed keyframes for offline Fact3R mask generation",
+    )
 
     args = parser.parse_args()
 
@@ -309,6 +314,9 @@ if __name__ == "__main__":
             print(f"FPS: {FPS}")
         i += 1
 
+    # Ensure the final global pose update is visible to all reconstruction exports.
+    backend.join()
+
     if dataset.save_results:
         save_dir, seq_name = eval.prepare_savedir(args, dataset)
         eval.save_traj(save_dir, f"{seq_name}.txt", dataset.timestamps, keyframes)
@@ -321,6 +329,19 @@ if __name__ == "__main__":
         eval.save_keyframes(
             save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes
         )
+        if args.export_fact3r:
+            fact3r_project = pathlib.Path(__file__).parent / "fact3r-map"
+            sys.path.insert(0, str(fact3r_project))
+            from fact3r.integrations.mast3r_slam import export_mast3r_keyframes
+
+            manifest = export_mast3r_keyframes(
+                save_dir / "fact3r_keyframes" / seq_name,
+                dataset.timestamps,
+                keyframes,
+            )
+            print(f"Fact3R keyframes exported to {manifest.parent}")
+    elif args.export_fact3r:
+        print("[Warning] Fact3R export is unavailable for an unbounded live stream")
     if save_frames:
         savedir = pathlib.Path(f"logs/frames/{datetime_now}")
         savedir.mkdir(exist_ok=True, parents=True)
@@ -330,6 +351,5 @@ if __name__ == "__main__":
             cv2.imwrite(f"{savedir}/{i}.png", frame)
 
     print("done")
-    backend.join()
     if not args.no_viz:
         viz.join()
