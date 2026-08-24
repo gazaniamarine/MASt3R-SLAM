@@ -1,5 +1,7 @@
+import datetime
 import pathlib
 import re
+import time
 import cv2
 from natsort import natsorted
 import numpy as np
@@ -228,6 +230,61 @@ class Webcam(MonocularDataset):
         return img
 
 
+class MJPEGStream(MonocularDataset):
+    """Live MJPEG-over-HTTP stream — e.g. the rover Pi's ffmpeg feed.
+
+    cv2.VideoCapture takes a URL as happily as a device index, so the same
+    OpenCV path that backs Webcam works against a remote camera. Two things
+    differ from Webcam deliberately:
+
+      * save_results stays True. A live rover run is exactly when you want the
+        .ply and trajectory kept, and prepare_savedir() needs a stem-able
+        dataset_path to name them, so we synthesise a timestamped one.
+      * timestamps are wall-clock, not idx/30. Over a network the stream drops
+        frames under load, and pretending they arrived at a fixed 30 Hz would
+        feed the optimiser timestamps that never happened.
+    """
+
+    def __init__(self, url, max_frames=999999):
+        super().__init__()
+        self.use_calibration = config["use_calib"]
+        self.url = url
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.dataset_path = pathlib.Path(f"rover_live_{stamp}")
+        self.save_results = True
+        self.cap = cv2.VideoCapture(url)
+        if not self.cap.isOpened():
+            raise RuntimeError(
+                f"could not open stream {url}\n"
+                f"  - is ffmpeg still streaming on the Pi?\n"
+                f"  - reachable from here? try: curl -sI {url}"
+            )
+        self.max_frames = max_frames
+        self.t0 = time.time()
+
+    def __len__(self):
+        return self.max_frames
+
+    def read_img(self, idx):
+        ok, img = self.cap.read()
+        if not ok:
+            raise ValueError(
+                f"stream ended or dropped at frame {idx} ({self.url}). "
+                f"Quit the viewer to save what was reconstructed so far."
+            )
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        t = time.time() - self.t0
+        # Index-safe: get_img_shape() calls read_img(0) before the main loop,
+        # so a plain append would leave timestamps off by one from here on.
+        while len(self.timestamps) < idx:
+            self.timestamps.append(t)
+        if idx < len(self.timestamps):
+            self.timestamps[idx] = t
+        else:
+            self.timestamps.append(t)
+        return img
+
+
 class MP4Dataset(MonocularDataset):
     def __init__(self, dataset_path):
         super().__init__()
@@ -318,6 +375,10 @@ class Intrinsics:
 
 
 def load_dataset(dataset_path):
+    # URL check first: a URL contains "/" and would otherwise be split and
+    # matched against the folder-name heuristics below.
+    if dataset_path.startswith(("http://", "https://")):
+        return MJPEGStream(dataset_path)
     split_dataset_type = dataset_path.split("/")
     if "tum" in split_dataset_type:
         return TUMDataset(dataset_path)

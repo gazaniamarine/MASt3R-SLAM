@@ -157,9 +157,20 @@ if __name__ == "__main__":
     parser.add_argument("--no-viz", action="store_true")
     parser.add_argument("--calib", default="")
     parser.add_argument(
+<<<<<<< HEAD
         "--export-fact3r",
         action="store_true",
         help="export posed keyframes for offline Fact3R mask generation",
+=======
+        "--conf-thresh",
+        type=float,
+        default=None,
+        help="confidence below which points are dropped from the saved .ply. "
+        "Defaults to the viewer's C_conf_threshold slider, which under --no-viz "
+        "is just its initial value of 1.5 and was never chosen for any "
+        "particular purpose. Since the .ply now carries per-point confidence, "
+        "save permissively here and filter downstream.",
+>>>>>>> 6090308 (Fix occupancy grid scale and free-space carving)
     )
 
     args = parser.parse_args()
@@ -324,7 +335,7 @@ if __name__ == "__main__":
             save_dir,
             f"{seq_name}.ply",
             keyframes,
-            last_msg.C_conf_threshold,
+            last_msg.C_conf_threshold if args.conf_thresh is None else args.conf_thresh,
         )
         eval.save_keyframes(
             save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes

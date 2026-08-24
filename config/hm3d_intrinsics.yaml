@@ -1,0 +1,7 @@
+# Habitat-sim pinhole camera used by scripts/render_hm3d_traj.py:
+# square 512x512 render at 90 deg HFOV -> fx = fy = (W/2)/tan(hfov/2) = 256,
+# principal point at the image centre, no distortion.
+width: 512
+height: 512
+# fx, fy, cx, cy
+calibration: [256.0, 256.0, 256.0, 256.0]
