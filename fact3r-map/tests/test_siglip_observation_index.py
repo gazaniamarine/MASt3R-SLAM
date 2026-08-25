@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 
@@ -11,6 +12,7 @@ from fact3r.semantics.observation_index import (
     build_observation_index,
     load_observation_index,
     masked_context_crop,
+    _pooled_feature_value,
     query_observation_index,
 )
 
@@ -190,6 +192,14 @@ def _write_mapping(directory: Path) -> None:
 
 
 class SiglipObservationIndexTests(unittest.TestCase):
+    def test_transformers_pooled_output_container_is_unwrapped(self) -> None:
+        pooled = np.ones((2, 4), dtype=np.float32)
+        output = SimpleNamespace(
+            last_hidden_state=np.ones((2, 16, 4), dtype=np.float32),
+            pooler_output=pooled,
+        )
+        self.assertIs(_pooled_feature_value(output), pooled)
+
     def test_masked_crop_dims_context_without_losing_selected_pixels(self) -> None:
         rgb = np.full((5, 5, 3), 200, dtype=np.uint8)
         mask = np.zeros((5, 5), dtype=bool)

@@ -50,6 +50,20 @@ def _normalise_rows(values: object) -> NDArray[np.float32]:
     return np.ascontiguousarray(array / norms)
 
 
+def _pooled_feature_value(output: object) -> object:
+    """Unwrap feature tensors across Transformers 4.x and 5.x APIs."""
+
+    for name in ("image_embeds", "text_embeds", "pooler_output"):
+        value = getattr(output, name, None)
+        if value is not None:
+            return value
+    if isinstance(output, (tuple, list)):
+        for value in reversed(output):
+            if getattr(value, "ndim", None) == 2:
+                return value
+    return output
+
+
 class Siglip2Encoder:
     """Lazy optional-dependency adapter for Hugging Face SigLIP2."""
 
@@ -118,7 +132,13 @@ class Siglip2Encoder:
             self._processor(images=list(images), return_tensors="pt")
         )
         with self._torch.inference_mode():
-            features = self._model.get_image_features(**inputs)
+            features = _pooled_feature_value(
+                self._model.get_image_features(**inputs)
+            )
+        if not self._torch.is_tensor(features) or features.ndim != 2:
+            raise TypeError(
+                "SigLIP image encoder did not return a pooled feature matrix"
+            )
         return _normalise_rows(features.detach().float().cpu().numpy())
 
     def encode_text(self, texts: Sequence[str]) -> FloatArray:
@@ -128,11 +148,18 @@ class Siglip2Encoder:
             self._processor(
                 text=list(texts),
                 padding="max_length",
+                truncation=True,
                 return_tensors="pt",
             )
         )
         with self._torch.inference_mode():
-            features = self._model.get_text_features(**inputs)
+            features = _pooled_feature_value(
+                self._model.get_text_features(**inputs)
+            )
+        if not self._torch.is_tensor(features) or features.ndim != 2:
+            raise TypeError(
+                "SigLIP text encoder did not return a pooled feature matrix"
+            )
         return _normalise_rows(features.detach().float().cpu().numpy())
 
 
