@@ -298,3 +298,36 @@ Stable entity colours expose identity switches; green boundaries denote reused
 entities, red boundaries denote newly created IDs, yellow denotes pending tracks,
 and cyan denotes known tracks held without a memory update. Use `--stride 2` for
 a smaller temporal sample or `--no-gif` when only full-resolution PNGs are needed.
+
+### 8. Encode every proposal for semantic recollection
+
+Reuse the completed delayed-UOT artifacts to attach each SigLIP2 mask embedding to
+its frame, track and persistent entity:
+
+```bash
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/build_siglip_observation_index.py \
+  --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --proposals logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --mapping logs/hm3d/calib_fact3r/fact3r_delayed_commitment_uot/SCENE_NAME \
+  --device 0
+```
+
+This stage batches masked crops and records its actual masks-per-second timing.
+It also retrospectively resolves early pending observations using the final
+track-to-entity commitments.
+
+### 9. Query an object and render all of its frames
+
+```bash
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/query_siglip_observations.py \
+  --index logs/hm3d/calib_fact3r/fact3r_siglip_observations/SCENE_NAME \
+  --query "a clock" \
+  --device 0
+```
+
+The output query directory contains `index.html`, `matches.gif`,
+`contact_sheet.jpg`, per-observation highlighted frames, and machine-readable
+scores in `results.json`. These are currently exported keyframe observations;
+full 30-FPS histories require the later intermediate-frame SAM2 propagation step.

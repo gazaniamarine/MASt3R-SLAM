@@ -11,6 +11,7 @@ dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
 sam2 = ["transformers>=4.56.0", "torch", "Pillow"]
+semantic = ["transformers>=4.56.0", "torch", "Pillow"]
 
 [tool.setuptools.packages.find]
 where = ["."]

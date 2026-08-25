@@ -717,7 +717,10 @@ Request open-vocabulary facts rather than a single caption:
 }
 ```
 
-The semantic model operates on temporary selected views. Original frames may be deleted after facts have been consolidated.
+The semantic model operates on selected views. During development, retain the
+exported keyframes so observation queries can render their complete visual
+history. A later deployment can replace those frames with compact thumbnails and
+source-video offsets after facts have been consolidated.
 
 ### 10.3 Multi-view consolidation
 
@@ -751,6 +754,44 @@ Each fact should refer to:
 
 This prevents attribute-binding errors such as attaching the colour of a nearby wall to a chair.
 
+### 10.5 SigLIP observation memory
+
+Before structured fact extraction, every saved SAM object or part proposal can be
+encoded as a masked, context-preserving SigLIP2 crop. The observation index stores
+the embedding together with its proposal ID, frame, timestamp, mask, track and
+persistent entity. Delayed observations are retrospectively attached to the
+entity eventually confirmed for their track, so the entity history includes the
+views seen before commitment.
+
+Build the index from the already-computed keyframes, proposals and delayed-UOT
+map; this does not rerun MASt3R-SLAM or SAM2:
+
+```bash
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/build_siglip_observation_index.py \
+  --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/00800-TEEsavR23oF \
+  --proposals logs/hm3d/calib_fact3r/fact3r_sam2/00800-TEEsavR23oF \
+  --mapping logs/hm3d/calib_fact3r/fact3r_delayed_commitment_uot/00800-TEEsavR23oF \
+  --device 0
+```
+
+The manifest records model loading, image-encoding and total indexing time, plus
+the measured mask throughput on the actual GPU. Query the index with free text:
+
+```bash
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/query_siglip_observations.py \
+  --index logs/hm3d/calib_fact3r/fact3r_siglip_observations/00800-TEEsavR23oF \
+  --query "a clock" \
+  --max-entities 3 \
+  --device 0
+```
+
+Entity scores use the mean of their strongest views. After an entity is selected,
+the query renders every indexed observation belonging to that entity rather than
+only the highest-scoring crop. The output contains `results.json`, an HTML
+gallery, individual highlighted frames, a contact sheet and `matches.gif`.
+
 ## 11. Semantic retrieval
 
 Convert a free-form query into a graph pattern.
@@ -769,7 +810,8 @@ Constraints:
     colour(D) approximately pink
 ```
 
-Use:
+The initial observation index provides direct image-text retrieval. Structured
+facts will later rerank these candidates using:
 
 1. structured field matching;
 2. synonym and predicate normalization;
