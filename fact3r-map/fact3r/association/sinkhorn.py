@@ -24,7 +24,7 @@ class BalancedSinkhornConfig:
     """Numerical parameters for the deliberately strict balanced baseline."""
 
     entropy_temperature: float = 0.05
-    max_iterations: int = 300
+    max_iterations: int = 2000
     marginal_tolerance: float = 1e-6
     noncandidate_cost: float = 2.0
 

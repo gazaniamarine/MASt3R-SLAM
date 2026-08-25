@@ -207,7 +207,7 @@ python scripts/run_balanced_sinkhorn.py \
   --output ../logs/hm3d/calib_fact3r/fact3r_balanced_sinkhorn/SCENE_NAME
 ```
 
-Defaults use entropy temperature `0.05`, 300 scaling iterations and marginal
+Defaults use entropy temperature `0.05`, 2,000 scaling iterations and marginal
 tolerance `1e-6`. The output saves the unchanged component costs, candidate mask,
 full transport plan, fixed marginals, row-wise hard commitments and numerical
 diagnostics for every frame. Because this stage has neither dustbins nor relaxed

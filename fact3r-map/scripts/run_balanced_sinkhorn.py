@@ -104,7 +104,7 @@ def main() -> None:
     parser.add_argument("--max-geometry-points", type=int, default=256)
     parser.add_argument("--temporal-weight", type=float, default=0.25)
     parser.add_argument("--entropy-temperature", type=float, default=0.05)
-    parser.add_argument("--max-iterations", type=int, default=300)
+    parser.add_argument("--max-iterations", type=int, default=2000)
     parser.add_argument("--marginal-tolerance", type=float, default=1e-6)
     parser.add_argument("--noncandidate-cost", type=float, default=2.0)
     parser.add_argument("--entity-voxel-size", type=float, default=0.04)
@@ -330,6 +330,7 @@ def main() -> None:
         f"Balanced Sinkhorn totals: matched={matched_total}, "
         f"created={created_total}, entities={len(entity_entries)}, "
         f"nonconverged_frames={nonconverged_frames}, "
+        f"max_marginal_error={output_manifest['max_marginal_error']:.3e}, "
         f"mean_forbidden_mass={output_manifest['mean_noncandidate_mass']:.3e}"
     )
     print(
