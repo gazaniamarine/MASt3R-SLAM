@@ -273,6 +273,41 @@ Where:
 
 Colour and shape are supporting cues. They must not override strong geometric contradictions.
 
+#### Implemented comparison baseline
+
+The first association baseline is implemented in `fact3r/association/`. It:
+
+1. gates proposal-entity pairs by expanded 3D bounding-box overlap or centroid distance;
+2. constructs one reusable cost matrix from centroid distance, padded 3D box overlap,
+   symmetric point consistency, robust RGB statistics and optional pooled MASt3R
+   descriptors;
+3. renormalizes the active weights when optional colour or descriptor evidence is
+   unavailable;
+4. applies exact one-to-one Hungarian assignment with a maximum accepted cost; and
+5. returns matched pairs plus unmatched proposal and entity indices.
+
+`HungarianEntityMapper` applies this solver once to the complete proposal set for
+each keyframe. It updates matched entity geometry, retains unobserved entities and
+creates a provisional entity for every unmatched mask. This immediate update rule is
+only the hard baseline; it intentionally performs no confirmation transition,
+delayed belief, confidence gate or split/merge operation. The runnable boundary is:
+
+```bash
+python scripts/run_hungarian_baseline.py \
+  --proposals /path/to/fact3r_sam2/scene \
+  --output /path/to/fact3r_hungarian/scene
+```
+
+The output manifest records frame-level matches and created/unobserved IDs. Each
+frame also stores the complete cost matrix, candidate mask and component costs so
+later assignment models can be compared against identical evidence.
+
+This same `PairwiseCostMatrix` is the input boundary for the balanced Sinkhorn,
+dustbin and unbalanced variants. Keeping the evidence fixed isolates the effect of
+the assignment model in later ablations. The private unmatched columns used by the
+Hungarian solver are only an implementation mechanism; they are not the learned or
+shared dustbins introduced by the transport model.
+
 ### 8.2 Point-level transport score
 
 Within each gated proposal-entity pair, sample proposal points \(p_a\) and entity surfels \(s_b\). Define:

@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import numpy as np
 
+from fact3r.proposals.lift_to_3d import LiftedProposal
 from fact3r.proposals.proposal_pipeline import GeneratedProposal
 from fact3r.reconstruction.keyframes import KeyframeRecord
 from fact3r.visualization.alignment import write_alignment_ply
+
+
+@dataclass(frozen=True, slots=True)
+class SavedProposalFrame:
+    """All lifted proposals produced for one complete keyframe."""
+
+    frame_id: int
+    timestamp: float | str | None
+    proposals: tuple[LiftedProposal, ...]
 
 
 def save_frame_proposals(
@@ -74,3 +85,76 @@ def save_frame_proposals(
     )
     return manifest
 
+
+def load_proposal_run_manifest(
+    proposal_directory: str | Path,
+) -> dict[str, object]:
+    """Load and validate the top-level SAM2 proposal-run manifest."""
+
+    directory = Path(proposal_directory)
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("format") != "fact3r-sam2-proposals":
+        raise ValueError(f"unsupported proposal run in {manifest_path}")
+    if manifest.get("version") != 1:
+        raise ValueError(
+            f"unsupported proposal-run version {manifest.get('version')}"
+        )
+    return manifest
+
+
+def iter_saved_proposal_frames(
+    proposal_directory: str | Path,
+) -> Iterator[SavedProposalFrame]:
+    """Stream complete-frame proposal batches saved by the SAM2 runner."""
+
+    directory = Path(proposal_directory)
+    run_manifest = load_proposal_run_manifest(directory)
+    for run_entry in run_manifest["frames"]:
+        frame_manifest_path = directory / run_entry["manifest"]
+        frame_manifest = json.loads(
+            frame_manifest_path.read_text(encoding="utf-8")
+        )
+        frame_id = int(frame_manifest["frame_id"])
+        proposals: list[LiftedProposal] = []
+        for entry in frame_manifest["proposals"]:
+            with np.load(
+                frame_manifest_path.parent / entry["file"], allow_pickle=False
+            ) as payload:
+                descriptors = (
+                    np.array(payload["mast3r_descriptors"], copy=True)
+                    if "mast3r_descriptors" in payload.files
+                    else None
+                )
+                descriptor_confidence = (
+                    np.array(payload["descriptor_confidence"], copy=True)
+                    if "descriptor_confidence" in payload.files
+                    else None
+                )
+                proposals.append(
+                    LiftedProposal(
+                        proposal_id=str(entry["proposal_id"]),
+                        frame_id=frame_id,
+                        timestamp=frame_manifest.get("timestamp"),
+                        pixel_rc=np.array(payload["pixel_rc"], copy=True),
+                        points_world=np.array(payload["points_world"], copy=True),
+                        colours_rgb=np.array(payload["colours_rgb"], copy=True),
+                        geometry_confidence=np.array(
+                            payload["geometry_confidence"], copy=True
+                        ),
+                        mast3r_descriptors=descriptors,
+                        descriptor_confidence=descriptor_confidence,
+                        source_mask_area=int(entry["mask_area"]),
+                    )
+                )
+        expected_count = int(frame_manifest["proposal_count"])
+        if len(proposals) != expected_count:
+            raise ValueError(
+                f"frame {frame_id} declares {expected_count} proposals but "
+                f"contains {len(proposals)} entries"
+            )
+        yield SavedProposalFrame(
+            frame_id=frame_id,
+            timestamp=frame_manifest.get("timestamp"),
+            proposals=tuple(proposals),
+        )

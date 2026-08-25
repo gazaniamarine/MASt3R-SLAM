@@ -98,6 +98,34 @@ logs/fact3r_trial/fact3r_sam2/rgbd_dataset_freiburg1_room/
 
 Each proposal NPZ contains its cleaned 2D mask, selected source pixels, world-coordinate 3D points, RGB, and MASt3R geometry confidence. `alignment.ply` shows the filtered masks over the reconstructed keyframe pointmap.
 
+### 3. Run the complete-frame Hungarian baseline
+
+The proposal builder defaults to Meta's official SAM2 backend. Once it has produced
+the scene proposal manifest, run:
+
+```bash
+python scripts/run_hungarian_baseline.py \
+  --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME
+```
+
+Every invocation of the mapper processes all masks from one keyframe jointly. SAM2
+and MASt3R are not rerun for individual mask/entity pairs. The baseline creates
+provisional entities from the first frame, applies one Hungarian solve on each later
+proposal-by-entity matrix, updates matched geometry, creates entities for unmatched
+masks and retains entities that are not observed.
+
+The default output is a sibling `fact3r_hungarian/SCENE_NAME` directory containing:
+
+```text
+manifest.json
+frames/frame_XXXXXX_costs.npz
+entities/entity-XXXXXX.npz
+```
+
+This is intentionally a hard-assignment reference. Its entity fragmentation and
+identity switches are measurements for the later balanced/unbalanced transport
+models, not behavior that should be hidden with later memory rules.
+
 ## Filtering performed before lifting
 
 The pipeline currently applies:

@@ -60,6 +60,7 @@ class SAM2OfficialMaskGenerator:
         self.pred_iou_threshold = pred_iou_threshold
         self.stability_score_threshold = stability_score_threshold
         self._device = _torch_device(device)
+        self._uses_injected_generator = generator_instance is not None
         if generator_instance is None:
             try:
                 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
@@ -82,16 +83,19 @@ class SAM2OfficialMaskGenerator:
     def generate(
         self, rgb: NDArray[np.generic], *, frame_id: int
     ) -> list[MaskProposal2D]:
-        import torch
-
         image = _rgb_uint8(rgb)
-        use_autocast = str(self._device).startswith("cuda")
-        with torch.inference_mode():
-            if use_autocast:
-                with torch.autocast("cuda", dtype=torch.bfloat16):
+        if self._uses_injected_generator:
+            annotations = self._generator.generate(image)
+        else:
+            import torch
+
+            use_autocast = str(self._device).startswith("cuda")
+            with torch.inference_mode():
+                if use_autocast:
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        annotations = self._generator.generate(image)
+                else:
                     annotations = self._generator.generate(image)
-            else:
-                annotations = self._generator.generate(image)
 
         proposals: list[MaskProposal2D] = []
         for index, annotation in enumerate(annotations):
