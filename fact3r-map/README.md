@@ -369,6 +369,28 @@ such edges can never become hard matches. The runner reports this as
 `mean_forbidden_mass`, along with convergence and marginal error, making the
 failure mode explicit for the dustbin and unbalanced comparisons.
 
+#### Image and temporal inspection
+
+Association manifests can be rendered directly over the exported RGB keyframes.
+The command accepts multiple mapping runs so the same frame can be compared side
+by side:
+
+```bash
+python scripts/visualize_association.py \
+  --keyframes /path/to/fact3r_keyframes/scene \
+  --proposals /path/to/fact3r_sam2/scene \
+  --mapping "Hungarian+tracklets=/path/to/fact3r_hungarian_tracklets/scene" \
+  --mapping "Balanced Sinkhorn=/path/to/fact3r_balanced_sinkhorn/scene" \
+  --output /path/to/fact3r_association_visualization/scene
+```
+
+Entity colours are stable across frames. Green mask boundaries and `M` labels are
+matched observations; red boundaries and `N` labels are newly created entities.
+Sinkhorn panels also display convergence, iteration count and forbidden mass. The
+output contains every comparison frame as PNG, a sampled
+`association_contact_sheet.png`, and an `association.gif` for temporal identity
+inspection.
+
 This same `PairwiseCostMatrix` is the input boundary for the balanced Sinkhorn,
 dustbin and unbalanced variants. Keeping the evidence fixed isolates the effect of
 the assignment model in later ablations. The private unmatched columns used by the

@@ -16,7 +16,7 @@ RGB input -> MASt3R inference -> keyframes -> pointmaps/confidence
           -> tracking/global poses -> loop closure -> reconstruction
 ```
 
-Fact3R now has validated keyframe, lifted-proposal, entity, and semantic-fact contracts; a read-only keyframe adapter; a finalized-keyframe disk export; official and Transformers SAM2 automatic mask generation; geometry-aware mask filtering; mask-to-world lifting; alignment visualization; saved-proposal streaming; re-anchored official-SAM2 video tracklets; spatial proposal-entity gating; reusable multi-cue pairwise costs with an optional IoU-weighted temporal cue; exact Hungarian assignment; balanced log-domain Sinkhorn transport; and runnable complete-frame mappers. Persistent confirmation/inactive lifecycle behavior, dustbin/unbalanced transport, semantic extraction, BEV planning, and semantic querying still need to be implemented.
+Fact3R now has validated keyframe, lifted-proposal, entity, and semantic-fact contracts; a read-only keyframe adapter; a finalized-keyframe disk export; official and Transformers SAM2 automatic mask generation; geometry-aware mask filtering; mask-to-world lifting; alignment and RGB association visualization; saved-proposal streaming; re-anchored official-SAM2 video tracklets; spatial proposal-entity gating; reusable multi-cue pairwise costs with an optional IoU-weighted temporal cue; exact Hungarian assignment; balanced log-domain Sinkhorn transport; and runnable complete-frame mappers. Persistent confirmation/inactive lifecycle behavior, dustbin/unbalanced transport, semantic extraction, BEV planning, and semantic querying still need to be implemented.
 
 ## Reusable MASt3R-SLAM foundations
 

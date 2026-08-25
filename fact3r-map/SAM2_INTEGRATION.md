@@ -213,3 +213,21 @@ full transport plan, fixed marginals, row-wise hard commitments and numerical
 diagnostics for every frame. Because this stage has neither dustbins nor relaxed
 marginals, `mean_forbidden_mass` is an expected diagnostic rather than hidden
 post-processing.
+
+### 6. Render association images
+
+Compare mapping methods over the actual scene RGB and SAM2 masks:
+
+```bash
+python scripts/visualize_association.py \
+  --keyframes ../logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --mapping "Hungarian+tracklets=../logs/hm3d/calib_fact3r/fact3r_hungarian_tracklets/SCENE_NAME" \
+  --mapping "Balanced Sinkhorn=../logs/hm3d/calib_fact3r/fact3r_balanced_sinkhorn/SCENE_NAME" \
+  --output ../logs/hm3d/calib_fact3r/fact3r_association_visualization/SCENE_NAME
+```
+
+This writes per-frame side-by-side PNGs, a contact sheet and an animated GIF.
+Stable entity colours expose identity switches; green boundaries denote reused
+entities and red boundaries denote newly created IDs. Use `--stride 2` for a
+smaller temporal sample or `--no-gif` when only full-resolution PNGs are needed.
