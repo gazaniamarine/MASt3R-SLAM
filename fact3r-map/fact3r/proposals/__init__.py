@@ -5,6 +5,7 @@ from fact3r.proposals.mask_filter import MaskFilterConfig, filter_mask_proposals
 from fact3r.proposals.mask_generator import MaskGenerator, MaskProposal2D
 from fact3r.proposals.proposal_pipeline import GeneratedProposal, generate_lifted_proposals
 from fact3r.proposals.sam2_generator import SAM2AutomaticMaskGenerator
+from fact3r.proposals.sam2_official_generator import SAM2OfficialMaskGenerator
 
 __all__ = [
     "GeneratedProposal",
@@ -13,6 +14,7 @@ __all__ = [
     "MaskGenerator",
     "MaskProposal2D",
     "SAM2AutomaticMaskGenerator",
+    "SAM2OfficialMaskGenerator",
     "filter_mask_proposals",
     "generate_lifted_proposals",
     "lift_mask_to_3d",

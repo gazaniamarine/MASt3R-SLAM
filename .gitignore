@@ -138,3 +138,8 @@ screen.yaml
 *.pt
 *.ini
 notebooks/*
+
+# Proposal / metric renders and clouds. A single scene_proposals.ply is ~50 MB
+# and every one of these is reproducible from logs/ via the scripts in
+# fact3r-map/scripts/, so none of it belongs in the history.
+output/

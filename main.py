@@ -157,11 +157,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-viz", action="store_true")
     parser.add_argument("--calib", default="")
     parser.add_argument(
-<<<<<<< HEAD
         "--export-fact3r",
         action="store_true",
         help="export posed keyframes for offline Fact3R mask generation",
-=======
+    )
+    parser.add_argument(
         "--conf-thresh",
         type=float,
         default=None,
@@ -170,7 +170,6 @@ if __name__ == "__main__":
         "is just its initial value of 1.5 and was never chosen for any "
         "particular purpose. Since the .ply now carries per-point confidence, "
         "save permissively here and filter downstream.",
->>>>>>> 6090308 (Fix occupancy grid scale and free-space carving)
     )
 
     args = parser.parse_args()

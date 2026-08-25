@@ -16,6 +16,9 @@ from fact3r.integrations.mast3r_slam import iter_exported_keyframes  # noqa: E40
 from fact3r.proposals.mask_filter import MaskFilterConfig  # noqa: E402
 from fact3r.proposals.proposal_pipeline import generate_lifted_proposals  # noqa: E402
 from fact3r.proposals.sam2_generator import SAM2AutomaticMaskGenerator  # noqa: E402
+from fact3r.proposals.sam2_official_generator import (  # noqa: E402
+    SAM2OfficialMaskGenerator,
+)
 from fact3r.proposals.storage import save_frame_proposals  # noqa: E402
 
 
@@ -27,7 +30,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyframes", type=Path, required=True)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--model", default="facebook/sam2.1-hiera-large")
+    parser.add_argument(
+        "--backend",
+        default="official",
+        choices=("official", "transformers"),
+        help="official: Meta's sam2 package; transformers: the HF mask-generation pipeline",
+    )
+    parser.add_argument(
+        "--model",
+        help="default: facebook/sam2-hiera-large (official) "
+        "or facebook/sam2.1-hiera-large (transformers)",
+    )
+    parser.add_argument("--points-per-side", type=int, default=32)
     parser.add_argument("--device", default="0", help="pipeline device, e.g. 0 or cpu")
     parser.add_argument("--points-per-batch", type=int, default=64)
     parser.add_argument("--pred-iou-threshold", type=float, default=0.88)
@@ -44,13 +58,25 @@ def main() -> None:
 
     output = args.output or _default_output(args.keyframes)
     output.mkdir(parents=True, exist_ok=True)
-    generator = SAM2AutomaticMaskGenerator(
-        args.model,
-        device=args.device,
-        points_per_batch=args.points_per_batch,
-        pred_iou_threshold=args.pred_iou_threshold,
-        stability_score_threshold=args.stability_score_threshold,
-    )
+    if args.backend == "official":
+        model = args.model or "facebook/sam2-hiera-large"
+        generator = SAM2OfficialMaskGenerator(
+            model,
+            device=args.device,
+            points_per_side=args.points_per_side,
+            points_per_batch=args.points_per_batch,
+            pred_iou_threshold=args.pred_iou_threshold,
+            stability_score_threshold=args.stability_score_threshold,
+        )
+    else:
+        model = args.model or "facebook/sam2.1-hiera-large"
+        generator = SAM2AutomaticMaskGenerator(
+            model,
+            device=args.device,
+            points_per_batch=args.points_per_batch,
+            pred_iou_threshold=args.pred_iou_threshold,
+            stability_score_threshold=args.stability_score_threshold,
+        )
     filter_config = MaskFilterConfig(
         min_score=args.pred_iou_threshold,
         min_area_pixels=args.min_area_pixels,
@@ -78,7 +104,8 @@ def main() -> None:
     run_manifest = {
         "format": "fact3r-sam2-proposals",
         "version": 1,
-        "model": args.model,
+        "backend": args.backend,
+        "model": model,
         "keyframe_export": str(args.keyframes.resolve()),
         "filter_config": {
             name: getattr(filter_config, name)

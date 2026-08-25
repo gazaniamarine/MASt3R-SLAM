@@ -14,8 +14,32 @@ from fact3r.proposals.mask_filter import MaskFilterConfig, filter_mask_proposals
 from fact3r.proposals.mask_generator import MaskProposal2D
 from fact3r.proposals.proposal_pipeline import generate_lifted_proposals
 from fact3r.proposals.sam2_generator import SAM2AutomaticMaskGenerator
+from fact3r.proposals.sam2_official_generator import SAM2OfficialMaskGenerator
 from fact3r.proposals.storage import save_frame_proposals
 from fact3r.reconstruction.keyframes import KeyframeRecord
+
+
+class _MockOfficialGenerator:
+    """Stands in for sam2.automatic_mask_generator.SAM2AutomaticMaskGenerator."""
+
+    def __init__(self, mask_shape: tuple[int, int] = (6, 6)) -> None:
+        self.mask_shape = mask_shape
+
+    def generate(self, image: np.ndarray) -> list[dict]:
+        annotations = []
+        for index in range(2):
+            mask = np.zeros(self.mask_shape, dtype=bool)
+            mask[index, :] = True
+            annotations.append(
+                {
+                    "segmentation": mask,
+                    "predicted_iou": 0.9 - 0.1 * index,
+                    "stability_score": 0.97,
+                    "area": int(mask.sum()),
+                    "bbox": [1.0, 2.0, 3.0, 4.0],
+                }
+            )
+        return annotations
 
 
 class _FakePose:
@@ -131,6 +155,32 @@ class Sam2IntegrationTests(unittest.TestCase):
         self.assertEqual(proposals[0].mask.shape, (6, 6))
         self.assertEqual(pipeline.call_kwargs["points_per_batch"], 32)
         self.assertNotIn("input_points", pipeline.call_kwargs)
+
+    def test_official_backend_converts_annotations_to_proposals(self) -> None:
+        generator = SAM2OfficialMaskGenerator(
+            generator_instance=_MockOfficialGenerator(),
+            device="cpu",
+        )
+        proposals = generator.generate(np.zeros((6, 6, 3)), frame_id=3)
+        self.assertEqual(len(proposals), 2)
+        self.assertEqual(proposals[0].mask.shape, (6, 6))
+        self.assertEqual(proposals[0].frame_id, 3)
+        self.assertAlmostEqual(proposals[0].score, 0.9)
+        self.assertEqual(proposals[0].metadata["stability_score"], 0.97)
+        # sam2 reports xywh; the shared contract is xyxy.
+        np.testing.assert_allclose(
+            proposals[0].bounding_box_xyxy, [1.0, 2.0, 4.0, 6.0]
+        )
+
+    def test_official_backend_rejects_mask_of_the_wrong_size(self) -> None:
+        """A mask that does not match the keyframe raster cannot be lifted."""
+
+        generator = SAM2OfficialMaskGenerator(
+            generator_instance=_MockOfficialGenerator(mask_shape=(4, 4)),
+            device="cpu",
+        )
+        with self.assertRaises(ValueError):
+            generator.generate(np.zeros((6, 6, 3)), frame_id=0)
 
     def test_filter_removes_full_image_and_duplicate_masks(self) -> None:
         pipeline = _MockPipeline()
