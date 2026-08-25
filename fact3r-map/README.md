@@ -316,6 +316,35 @@ reason counts and run-level totals. `no_spatial_candidate` is deliberately not c
 "new object": distinguishing new scene content from a gating failure requires
 visibility/map-coverage evidence that this baseline does not yet model.
 
+#### Optional SAM2 short-term continuity cue
+
+The official SAM2 video predictor can now propagate every accepted proposal into
+the next keyframe. Propagated masks are jointly linked to the next frame's complete
+automatic-proposal set by one-to-one 2D mask IoU. Linked proposals inherit a
+diagnostic track ID; unlinked proposals start a new track. Each frame is re-anchored
+to its automatic masks, so errors do not accumulate through unrestricted video
+propagation and the number of live SAM2 objects remains bounded.
+
+```bash
+python scripts/build_sam2_tracklets.py \
+  --keyframes /path/to/fact3r_keyframes/scene \
+  --proposals /path/to/fact3r_sam2/scene \
+  --device 0 \
+  --min-link-iou 0.30 \
+  --max-seeds-per-batch 8
+
+python scripts/run_hungarian_baseline.py \
+  --proposals /path/to/fact3r_sam2/scene \
+  --tracklets /path/to/fact3r_sam2_tracklets/scene \
+  --output /path/to/fact3r_hungarian_tracklets/scene
+```
+
+At association time, an adjacent-frame link is resolved through the source
+proposal's assigned entity. Its IoU-weighted identity preference is added as a
+`temporal` cost component. It cannot bypass the existing 3D spatial gate and does
+not force a match; contradictory geometry can still win or leave the proposal
+unmatched. Omitting `--tracklets` reproduces the geometry-first Hungarian baseline.
+
 This same `PairwiseCostMatrix` is the input boundary for the balanced Sinkhorn,
 dustbin and unbalanced variants. Keeping the evidence fixed isolates the effect of
 the assignment model in later ablations. The private unmatched columns used by the

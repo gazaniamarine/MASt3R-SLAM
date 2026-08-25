@@ -98,14 +98,37 @@ logs/fact3r_trial/fact3r_sam2/rgbd_dataset_freiburg1_room/
 
 Each proposal NPZ contains its cleaned 2D mask, selected source pixels, world-coordinate 3D points, RGB, and MASt3R geometry confidence. `alignment.ply` shows the filtered masks over the reconstructed keyframe pointmap.
 
-### 3. Run the complete-frame Hungarian baseline
+### 3. Build short-term SAM2 video tracklets (optional)
+
+Automatic masks are still generated independently on complete frames. The video
+predictor is used only as a continuity measurement: proposals from one keyframe
+are supplied as mask prompts, propagated one step, and jointly linked by mask IoU
+to the next keyframe's automatic proposals. The next frame's accepted automatic
+masks then re-anchor the tracks.
+
+```bash
+python scripts/build_sam2_tracklets.py \
+  --keyframes ../logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --device 0 \
+  --min-link-iou 0.30 \
+  --max-seeds-per-batch 8
+```
+
+The default output is `fact3r_sam2_tracklets/SCENE_NAME/manifest.json`. Reduce
+`--max-seeds-per-batch` if multi-object video propagation runs out of GPU memory.
+The manifest retains every proposal's track ID, incoming source proposal and link
+IoU, so the cue can be audited independently of 3D assignment.
+
+### 4. Run the complete-frame Hungarian baseline
 
 The proposal builder defaults to Meta's official SAM2 backend. Once it has produced
 the scene proposal manifest, run:
 
 ```bash
 python scripts/run_hungarian_baseline.py \
-  --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME
+  --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --tracklets ../logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/SCENE_NAME
 ```
 
 Every invocation of the mapper processes all masks from one keyframe jointly. SAM2
@@ -126,10 +149,13 @@ This is intentionally a hard-assignment reference. Its entity fragmentation and
 identity switches are measurements for the later balanced/unbalanced transport
 models, not behavior that should be hidden with later memory rules.
 
-The Hungarian manifest version 2 also explains every created entity as an empty-map
+The Hungarian manifest version 3 also explains every created entity as an empty-map
 initialization, missing spatial candidate, above-threshold candidate, or one-to-one
-assignment competition. Re-running this stage over existing proposals does not
-require MASt3R-SLAM or SAM2 inference.
+assignment competition. It additionally records how many adjacent-frame tracklet
+hints were available and how many assignments honored them. The temporal component
+is weighted by propagation IoU and cannot bypass 3D spatial gating. Omitting
+`--tracklets` runs the original geometry-first baseline. Re-running association over
+existing proposals and tracklets does not require MASt3R-SLAM or SAM2 inference.
 
 ## Filtering performed before lifting
 
@@ -163,6 +189,8 @@ Reduce `--points-per-batch` if automatic mask generation runs out of GPU memory.
 - SAM2 masks are not semantic labels.
 - Overlapping masks are not persistent entities.
 - SAM2's mask order is not an object ID across frames.
-- Similar masks from different keyframes are not associated yet.
+- A SAM2 tracklet is only a short-term cue, not a persistent entity ID.
 
-The next association step must use the lifted geometry and MASt3R correspondence evidence to decide which observations belong to the same physical entity.
+Persistent identity is still decided jointly from lifted geometry, MASt3R evidence
+and the optional temporal cue. The next assignment milestone replaces hard
+Hungarian commitment with balanced and then unbalanced transport.

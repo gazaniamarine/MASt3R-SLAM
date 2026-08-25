@@ -7,6 +7,7 @@ import numpy as np
 from fact3r.association.costs import (
     PairwiseCostConfig,
     PairwiseCostMatrix,
+    TemporalEntityHint,
     build_pairwise_cost_matrix,
 )
 from fact3r.association.hungarian import (
@@ -106,6 +107,23 @@ class PairwiseCostTests(unittest.TestCase):
         self.assertTrue(np.isnan(matrix.components["colour"][0, 0]))
         self.assertTrue(np.isnan(matrix.components["descriptor"][0, 0]))
         self.assertAlmostEqual(matrix.costs[0, 0], 0.0, places=7)
+
+    def test_temporal_hint_biases_but_does_not_bypass_spatial_gating(self) -> None:
+        proposal = _proposal("p0", (0.0, 0.0, 1.0))
+        entities = [
+            _entity("other", (0.0, 0.0, 1.0)),
+            _entity("tracked", (0.0, 0.0, 1.0)),
+            _entity("far", (5.0, 0.0, 1.0)),
+        ]
+        hint = TemporalEntityHint(entity_id="tracked", confidence=0.8)
+        matrix = build_pairwise_cost_matrix(
+            [proposal], entities, temporal_hints={"p0": hint}
+        )
+        self.assertGreater(matrix.costs[0, 0], matrix.costs[0, 1])
+        self.assertEqual(matrix.components["temporal"][0, 0], 1.0)
+        self.assertEqual(matrix.components["temporal"][0, 1], 0.0)
+        self.assertFalse(matrix.candidate_mask[0, 2])
+        self.assertTrue(np.isinf(matrix.costs[0, 2]))
 
 
 class HungarianTests(unittest.TestCase):

@@ -26,6 +26,7 @@ class PairwiseCostConfig:
     geometry_weight: float = 0.45
     colour_weight: float = 0.05
     descriptor_weight: float = 0.15
+    temporal_weight: float = 0.25
 
     def __post_init__(self) -> None:
         if self.max_centroid_distance_m <= 0.0:
@@ -42,11 +43,26 @@ class PairwiseCostConfig:
             self.geometry_weight,
             self.colour_weight,
             self.descriptor_weight,
+            self.temporal_weight,
         )
         if any(weight < 0.0 for weight in weights):
             raise ValueError("pairwise cost weights cannot be negative")
         if sum(weights) <= 0.0:
             raise ValueError("at least one pairwise cost weight must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalEntityHint:
+    """A SAM2 tracklet preference resolved to an existing map entity."""
+
+    entity_id: str
+    confidence: float
+
+    def __post_init__(self) -> None:
+        if not self.entity_id:
+            raise ValueError("temporal hint entity_id cannot be empty")
+        if not np.isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("temporal hint confidence must be finite and in [0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +245,8 @@ def build_pairwise_cost_matrix(
     proposals: Sequence[LiftedProposal],
     entities: Sequence[Entity],
     config: PairwiseCostConfig | None = None,
+    *,
+    temporal_hints: Mapping[str, TemporalEntityHint] | None = None,
 ) -> PairwiseCostMatrix:
     """Gate candidate pairs and calculate a normalized geometry-first cost.
 
@@ -246,6 +264,7 @@ def build_pairwise_cost_matrix(
         "geometry": np.full(shape, np.nan, dtype=np.float64),
         "colour": np.full(shape, np.nan, dtype=np.float64),
         "descriptor": np.full(shape, np.nan, dtype=np.float64),
+        "temporal": np.full(shape, np.nan, dtype=np.float64),
     }
 
     proposal_colours = [
@@ -265,6 +284,8 @@ def build_pairwise_cost_matrix(
         )
         for entity in entities
     ]
+    temporal_hints = {} if temporal_hints is None else temporal_hints
+    entity_id_set = {entity.id for entity in entities}
 
     for proposal_index, proposal in enumerate(proposals):
         for entity_index, entity in enumerate(entities):
@@ -327,6 +348,23 @@ def build_pairwise_cost_matrix(
                     descriptor_cost
                 )
                 cue_values.append((config.descriptor_weight, descriptor_cost))
+
+            temporal_hint = temporal_hints.get(proposal.proposal_id)
+            if (
+                temporal_hint is not None
+                and temporal_hint.entity_id in entity_id_set
+                and temporal_hint.confidence > 0.0
+            ):
+                temporal_cost = float(entity.id != temporal_hint.entity_id)
+                components["temporal"][proposal_index, entity_index] = (
+                    temporal_cost
+                )
+                cue_values.append(
+                    (
+                        config.temporal_weight * temporal_hint.confidence,
+                        temporal_cost,
+                    )
+                )
 
             active_weight = sum(
                 weight for weight, _ in cue_values if weight > 0.0

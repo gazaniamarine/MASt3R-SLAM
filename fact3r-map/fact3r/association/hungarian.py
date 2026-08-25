@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from fact3r.association.costs import (
     PairwiseCostConfig,
     PairwiseCostMatrix,
+    TemporalEntityHint,
     build_pairwise_cost_matrix,
 )
 from fact3r.entities.entity import Entity
@@ -290,10 +291,16 @@ def associate_hungarian(
     *,
     cost_config: PairwiseCostConfig | None = None,
     max_match_cost: float = 0.65,
+    temporal_hints: Mapping[str, TemporalEntityHint] | None = None,
 ) -> HungarianResult:
     """Build the shared costs and run the hard Hungarian baseline."""
 
     return solve_hungarian(
-        build_pairwise_cost_matrix(proposals, entities, cost_config),
+        build_pairwise_cost_matrix(
+            proposals,
+            entities,
+            cost_config,
+            temporal_hints=temporal_hints,
+        ),
         max_match_cost=max_match_cost,
     )

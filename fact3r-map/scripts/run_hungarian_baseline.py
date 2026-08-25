@@ -19,7 +19,9 @@ from fact3r.association import (  # noqa: E402
     HungarianEntityMapper,
     HungarianMapConfig,
     PairwiseCostConfig,
+    TemporalEntityHint,
     UnmatchedReason,
+    load_tracklet_run,
 )
 from fact3r.proposals.storage import (  # noqa: E402
     iter_saved_proposal_frames,
@@ -87,6 +89,11 @@ def _save_entities(output: Path, entities) -> list[dict[str, object]]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--proposals", type=Path, required=True)
+    parser.add_argument(
+        "--tracklets",
+        type=Path,
+        help="optional manifest from build_sam2_tracklets.py",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--allow-any-backend",
@@ -99,6 +106,7 @@ def main() -> None:
     parser.add_argument("--bbox-padding", type=float, default=0.05)
     parser.add_argument("--geometry-match-distance", type=float, default=0.08)
     parser.add_argument("--max-geometry-points", type=int, default=256)
+    parser.add_argument("--temporal-weight", type=float, default=0.25)
     parser.add_argument("--entity-voxel-size", type=float, default=0.04)
     parser.add_argument("--max-entity-points", type=int, default=4096)
     args = parser.parse_args()
@@ -116,6 +124,7 @@ def main() -> None:
         bounding_box_padding_m=args.bbox_padding,
         geometry_match_distance_m=args.geometry_match_distance,
         max_geometry_points=args.max_geometry_points,
+        temporal_weight=args.temporal_weight,
     )
     map_config = HungarianMapConfig(
         pairwise_cost=pairwise_config,
@@ -124,21 +133,77 @@ def main() -> None:
         max_entity_points=args.max_entity_points,
     )
     mapper = HungarianEntityMapper(map_config)
+    tracklet_run = (
+        None if args.tracklets is None else load_tracklet_run(args.tracklets)
+    )
     output = args.output or _default_output(args.proposals)
     output.mkdir(parents=True, exist_ok=True)
 
     frame_entries: list[dict[str, object]] = []
     unmatched_reason_totals = {reason.value: 0 for reason in UnmatchedReason}
+    previous_proposal_entities: dict[str, str] = {}
+    temporal_hint_total = 0
+    temporal_hint_honored_total = 0
     for frame_index, frame in enumerate(
         iter_saved_proposal_frames(args.proposals)
     ):
         if args.max_frames is not None and frame_index >= args.max_frames:
             break
+        tracklet_observations = (
+            ()
+            if tracklet_run is None
+            else tracklet_run.observations_by_frame.get(frame.frame_id, ())
+        )
+        observations_by_proposal = {
+            observation.proposal_id: observation
+            for observation in tracklet_observations
+        }
+        temporal_hints: dict[str, TemporalEntityHint] = {}
+        for proposal in frame.proposals:
+            observation = observations_by_proposal.get(proposal.proposal_id)
+            if (
+                observation is None
+                or observation.source_proposal_id is None
+                or observation.link_iou is None
+            ):
+                continue
+            entity_id = previous_proposal_entities.get(
+                observation.source_proposal_id
+            )
+            if entity_id is not None:
+                temporal_hints[proposal.proposal_id] = TemporalEntityHint(
+                    entity_id=entity_id,
+                    confidence=observation.link_iou,
+                )
+
         result = mapper.process_frame(
             frame.proposals,
             frame_id=frame.frame_id,
             timestamp=frame.timestamp,
+            temporal_hints=temporal_hints,
         )
+        current_proposal_entities = {
+            match.proposal_id: match.entity_id
+            for match in result.assignment.matches
+        }
+        current_proposal_entities.update(
+            {
+                frame.proposals[proposal_index].proposal_id: entity_id
+                for proposal_index, entity_id in zip(
+                    result.assignment.unmatched_proposal_indices,
+                    result.created_entity_ids,
+                    strict=True,
+                )
+            }
+        )
+        honored_hints = {
+            match.proposal_id
+            for match in result.assignment.matches
+            if match.proposal_id in temporal_hints
+            and temporal_hints[match.proposal_id].entity_id == match.entity_id
+        }
+        temporal_hint_total += len(temporal_hints)
+        temporal_hint_honored_total += len(honored_hints)
         evidence_file = _save_cost_evidence(output, result)
         unmatched_reason_counts = result.assignment.unmatched_reason_counts
         for reason, count in unmatched_reason_counts.items():
@@ -150,6 +215,11 @@ def main() -> None:
                 "best_entity_id": unmatched.best_entity_id,
                 "best_cost": unmatched.best_cost,
                 "created_entity_id": created_entity_id,
+                "tracklet": (
+                    None
+                    if unmatched.proposal_id not in observations_by_proposal
+                    else asdict(observations_by_proposal[unmatched.proposal_id])
+                ),
             }
             for unmatched, created_entity_id in zip(
                 result.assignment.unmatched_proposals,
@@ -170,11 +240,24 @@ def main() -> None:
                         "proposal_id": match.proposal_id,
                         "entity_id": match.entity_id,
                         "cost": match.cost,
+                        "tracklet": (
+                            None
+                            if match.proposal_id not in observations_by_proposal
+                            else asdict(observations_by_proposal[match.proposal_id])
+                        ),
+                        "temporal_hint_entity_id": (
+                            None
+                            if match.proposal_id not in temporal_hints
+                            else temporal_hints[match.proposal_id].entity_id
+                        ),
+                        "temporal_hint_honored": match.proposal_id in honored_hints,
                     }
                     for match in result.assignment.matches
                 ],
                 "created_entity_ids": list(result.created_entity_ids),
                 "unmatched_reason_counts": unmatched_reason_counts,
+                "temporal_hint_count": len(temporal_hints),
+                "temporal_hint_honored_count": len(honored_hints),
                 "unmatched_proposals": unmatched_entries,
                 "unobserved_entity_ids": list(
                     result.assignment.unmatched_entity_ids
@@ -191,14 +274,20 @@ def main() -> None:
             f"matched={len(result.assignment.matches)} "
             f"created={len(result.created_entity_ids)} "
             f"entities={result.entity_count_after} "
-            f"unmatched[{reason_summary or 'none'}]"
+            f"unmatched[{reason_summary or 'none'}] "
+            f"tracklet_hints={len(temporal_hints)} "
+            f"honored={len(honored_hints)}"
         )
+        previous_proposal_entities = current_proposal_entities
 
     entity_entries = _save_entities(output, mapper.entities)
     output_manifest = {
         "format": "fact3r-hungarian-baseline",
-        "version": 2,
+        "version": 3,
         "source_proposals": str(args.proposals.resolve()),
+        "source_tracklets": (
+            None if args.tracklets is None else str(args.tracklets.resolve())
+        ),
         "source_backend": backend,
         "source_model": run_manifest.get("model"),
         "pairwise_cost_config": asdict(pairwise_config),
@@ -211,6 +300,8 @@ def main() -> None:
         "frame_count": len(frame_entries),
         "entity_count": len(entity_entries),
         "unmatched_reason_totals": unmatched_reason_totals,
+        "temporal_hint_total": temporal_hint_total,
+        "temporal_hint_honored_total": temporal_hint_honored_total,
         "frames": frame_entries,
         "entities": entity_entries,
     }
@@ -224,6 +315,10 @@ def main() -> None:
         for reason, count in unmatched_reason_totals.items()
     )
     print(f"Unmatched reason totals: {reason_summary}")
+    print(
+        f"Tracklet hints: used={temporal_hint_total}, "
+        f"honored={temporal_hint_honored_total}"
+    )
     print(f"Wrote Hungarian baseline map to {manifest_path}")
 
 

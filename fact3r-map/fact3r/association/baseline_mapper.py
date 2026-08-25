@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
-from fact3r.association.costs import PairwiseCostConfig
+from fact3r.association.costs import PairwiseCostConfig, TemporalEntityHint
 from fact3r.association.hungarian import HungarianResult, associate_hungarian
 from fact3r.entities.entity import Entity, EntityStatus
 from fact3r.proposals.lift_to_3d import LiftedProposal
@@ -119,6 +119,7 @@ class HungarianEntityMapper:
         *,
         frame_id: int,
         timestamp: float | str | None = None,
+        temporal_hints: Mapping[str, TemporalEntityHint] | None = None,
     ) -> FrameMappingResult:
         """Associate all proposals jointly, then apply baseline map updates."""
 
@@ -131,6 +132,9 @@ class HungarianEntityMapper:
             tuple(self._entities),
             cost_config=self.config.pairwise_cost,
             max_match_cost=self.config.max_match_cost,
+            temporal_hints=(
+                None if temporal_hints is None else dict(temporal_hints)
+            ),
         )
 
         for match in assignment.matches:

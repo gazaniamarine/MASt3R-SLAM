@@ -11,6 +11,7 @@ from fact3r.association import (
     HungarianEntityMapper,
     HungarianMapConfig,
     PairwiseCostConfig,
+    TemporalEntityHint,
     UnmatchedReason,
 )
 from fact3r.proposals.lift_to_3d import LiftedProposal
@@ -177,6 +178,26 @@ class HungarianMappingIntegrationTests(unittest.TestCase):
             UnmatchedReason.NO_SPATIAL_CANDIDATE,
         )
         self.assertEqual(len(mapper.entities), 2)
+
+    def test_mapper_uses_tracklet_hint_as_a_soft_identity_cue(self) -> None:
+        mapper = HungarianEntityMapper()
+        mapper.process_frame(
+            [_proposal("first-a", 0, 0.0), _proposal("first-b", 0, 0.0)],
+            frame_id=0,
+        )
+        result = mapper.process_frame(
+            [_proposal("continued", 1, 0.0)],
+            frame_id=1,
+            temporal_hints={
+                "continued": TemporalEntityHint(
+                    entity_id="entity-000001", confidence=1.0
+                )
+            },
+        )
+        self.assertEqual(len(result.assignment.matches), 1)
+        self.assertEqual(
+            result.assignment.matches[0].entity_id, "entity-000001"
+        )
 
 
 if __name__ == "__main__":
