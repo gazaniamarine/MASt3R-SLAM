@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Sequence
 
 import numpy as np
@@ -26,12 +27,32 @@ class HardMatch:
     cost: float
 
 
+class UnmatchedReason(str, Enum):
+    """Observable reason why a proposal did not receive a hard entity ID."""
+
+    EMPTY_MAP = "empty_map"
+    NO_SPATIAL_CANDIDATE = "no_spatial_candidate"
+    COST_ABOVE_THRESHOLD = "cost_above_threshold"
+    ASSIGNMENT_COMPETITION = "assignment_competition"
+
+
+@dataclass(frozen=True, slots=True)
+class UnmatchedProposal:
+    proposal_index: int
+    proposal_id: str
+    reason: UnmatchedReason
+    best_entity_index: int | None = None
+    best_entity_id: str | None = None
+    best_cost: float | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class HungarianResult:
     cost_matrix: PairwiseCostMatrix
     matches: tuple[HardMatch, ...]
     unmatched_proposal_indices: tuple[int, ...]
     unmatched_entity_indices: tuple[int, ...]
+    unmatched_proposals: tuple[UnmatchedProposal, ...]
 
     @property
     def unmatched_proposal_ids(self) -> tuple[str, ...]:
@@ -46,6 +67,66 @@ class HungarianResult:
             self.cost_matrix.entity_ids[index]
             for index in self.unmatched_entity_indices
         )
+
+    @property
+    def unmatched_reason_counts(self) -> dict[str, int]:
+        counts = {reason.value: 0 for reason in UnmatchedReason}
+        for proposal in self.unmatched_proposals:
+            counts[proposal.reason.value] += 1
+        return counts
+
+
+def _describe_unmatched_proposals(
+    cost_matrix: PairwiseCostMatrix,
+    unmatched_indices: tuple[int, ...],
+    max_match_cost: float,
+) -> tuple[UnmatchedProposal, ...]:
+    entity_count = len(cost_matrix.entity_ids)
+    descriptions: list[UnmatchedProposal] = []
+    for proposal_index in unmatched_indices:
+        if entity_count == 0:
+            descriptions.append(
+                UnmatchedProposal(
+                    proposal_index=proposal_index,
+                    proposal_id=cost_matrix.proposal_ids[proposal_index],
+                    reason=UnmatchedReason.EMPTY_MAP,
+                )
+            )
+            continue
+
+        candidate_indices = np.flatnonzero(
+            cost_matrix.candidate_mask[proposal_index]
+        )
+        if len(candidate_indices) == 0:
+            descriptions.append(
+                UnmatchedProposal(
+                    proposal_index=proposal_index,
+                    proposal_id=cost_matrix.proposal_ids[proposal_index],
+                    reason=UnmatchedReason.NO_SPATIAL_CANDIDATE,
+                )
+            )
+            continue
+
+        candidate_costs = cost_matrix.costs[proposal_index, candidate_indices]
+        best_offset = int(np.argmin(candidate_costs))
+        best_entity_index = int(candidate_indices[best_offset])
+        best_cost = float(candidate_costs[best_offset])
+        reason = (
+            UnmatchedReason.COST_ABOVE_THRESHOLD
+            if best_cost > max_match_cost
+            else UnmatchedReason.ASSIGNMENT_COMPETITION
+        )
+        descriptions.append(
+            UnmatchedProposal(
+                proposal_index=proposal_index,
+                proposal_id=cost_matrix.proposal_ids[proposal_index],
+                reason=reason,
+                best_entity_index=best_entity_index,
+                best_entity_id=cost_matrix.entity_ids[best_entity_index],
+                best_cost=best_cost,
+            )
+        )
+    return tuple(descriptions)
 
 
 def _rectangular_linear_sum_assignment(
@@ -138,11 +219,15 @@ def solve_hungarian(
         raise ValueError("max_match_cost must be finite and non-negative")
     proposal_count, entity_count = cost_matrix.costs.shape
     if proposal_count == 0 or entity_count == 0:
+        unmatched_indices = tuple(range(proposal_count))
         return HungarianResult(
             cost_matrix=cost_matrix,
             matches=(),
-            unmatched_proposal_indices=tuple(range(proposal_count)),
+            unmatched_proposal_indices=unmatched_indices,
             unmatched_entity_indices=tuple(range(entity_count)),
+            unmatched_proposals=_describe_unmatched_proposals(
+                cost_matrix, unmatched_indices, max_match_cost
+            ),
         )
 
     forbidden_cost = max_match_cost + max(1.0, max_match_cost)
@@ -179,18 +264,22 @@ def solve_hungarian(
         matched_proposals.add(proposal_index)
         matched_entities.add(entity_index)
 
+    unmatched_proposal_indices = tuple(
+        index
+        for index in range(proposal_count)
+        if index not in matched_proposals
+    )
     return HungarianResult(
         cost_matrix=cost_matrix,
         matches=tuple(matches),
-        unmatched_proposal_indices=tuple(
-            index
-            for index in range(proposal_count)
-            if index not in matched_proposals
-        ),
+        unmatched_proposal_indices=unmatched_proposal_indices,
         unmatched_entity_indices=tuple(
             index
             for index in range(entity_count)
             if index not in matched_entities
+        ),
+        unmatched_proposals=_describe_unmatched_proposals(
+            cost_matrix, unmatched_proposal_indices, max_match_cost
         ),
     )
 

@@ -302,6 +302,20 @@ The output manifest records frame-level matches and created/unobserved IDs. Each
 frame also stores the complete cost matrix, candidate mask and component costs so
 later assignment models can be compared against identical evidence.
 
+Every unmatched proposal is assigned one observable diagnostic reason:
+
+- `empty_map`: initialization frame contained no existing entities;
+- `no_spatial_candidate`: no entity survived spatial candidate gating;
+- `cost_above_threshold`: candidates existed, but even the best cost exceeded the
+  configured hard-match threshold;
+- `assignment_competition`: a viable candidate existed but was allocated to another
+  proposal by the one-to-one solver.
+
+The manifest stores the best candidate entity/cost where one exists, per-frame
+reason counts and run-level totals. `no_spatial_candidate` is deliberately not called
+"new object": distinguishing new scene content from a gating failure requires
+visibility/map-coverage evidence that this baseline does not yet model.
+
 This same `PairwiseCostMatrix` is the input boundary for the balanced Sinkhorn,
 dustbin and unbalanced variants. Keeping the evidence fixed isolates the effect of
 the assignment model in later ablations. The private unmatched columns used by the

@@ -19,6 +19,7 @@ from fact3r.association import (  # noqa: E402
     HungarianEntityMapper,
     HungarianMapConfig,
     PairwiseCostConfig,
+    UnmatchedReason,
 )
 from fact3r.proposals.storage import (  # noqa: E402
     iter_saved_proposal_frames,
@@ -127,6 +128,7 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
 
     frame_entries: list[dict[str, object]] = []
+    unmatched_reason_totals = {reason.value: 0 for reason in UnmatchedReason}
     for frame_index, frame in enumerate(
         iter_saved_proposal_frames(args.proposals)
     ):
@@ -138,6 +140,23 @@ def main() -> None:
             timestamp=frame.timestamp,
         )
         evidence_file = _save_cost_evidence(output, result)
+        unmatched_reason_counts = result.assignment.unmatched_reason_counts
+        for reason, count in unmatched_reason_counts.items():
+            unmatched_reason_totals[reason] += count
+        unmatched_entries = [
+            {
+                "proposal_id": unmatched.proposal_id,
+                "reason": unmatched.reason.value,
+                "best_entity_id": unmatched.best_entity_id,
+                "best_cost": unmatched.best_cost,
+                "created_entity_id": created_entity_id,
+            }
+            for unmatched, created_entity_id in zip(
+                result.assignment.unmatched_proposals,
+                result.created_entity_ids,
+                strict=True,
+            )
+        ]
         frame_entries.append(
             {
                 "frame_id": result.frame_id,
@@ -155,22 +174,30 @@ def main() -> None:
                     for match in result.assignment.matches
                 ],
                 "created_entity_ids": list(result.created_entity_ids),
+                "unmatched_reason_counts": unmatched_reason_counts,
+                "unmatched_proposals": unmatched_entries,
                 "unobserved_entity_ids": list(
                     result.assignment.unmatched_entity_ids
                 ),
             }
         )
+        reason_summary = ",".join(
+            f"{reason}={count}"
+            for reason, count in unmatched_reason_counts.items()
+            if count
+        )
         print(
             f"frame {frame.frame_id}: proposals={len(frame.proposals)} "
             f"matched={len(result.assignment.matches)} "
             f"created={len(result.created_entity_ids)} "
-            f"entities={result.entity_count_after}"
+            f"entities={result.entity_count_after} "
+            f"unmatched[{reason_summary or 'none'}]"
         )
 
     entity_entries = _save_entities(output, mapper.entities)
     output_manifest = {
         "format": "fact3r-hungarian-baseline",
-        "version": 1,
+        "version": 2,
         "source_proposals": str(args.proposals.resolve()),
         "source_backend": backend,
         "source_model": run_manifest.get("model"),
@@ -183,6 +210,7 @@ def main() -> None:
         },
         "frame_count": len(frame_entries),
         "entity_count": len(entity_entries),
+        "unmatched_reason_totals": unmatched_reason_totals,
         "frames": frame_entries,
         "entities": entity_entries,
     }
@@ -191,6 +219,11 @@ def main() -> None:
         json.dumps(output_manifest, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
+    reason_summary = ", ".join(
+        f"{reason}={count}"
+        for reason, count in unmatched_reason_totals.items()
+    )
+    print(f"Unmatched reason totals: {reason_summary}")
     print(f"Wrote Hungarian baseline map to {manifest_path}")
 
 

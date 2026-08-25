@@ -13,6 +13,8 @@ from fact3r.association.costs import (
 from fact3r.association.hungarian import (
     HardMatch,
     HungarianResult,
+    UnmatchedProposal,
+    UnmatchedReason,
     associate_hungarian,
     solve_hungarian,
 )
@@ -25,6 +27,8 @@ __all__ = [
     "HungarianResult",
     "PairwiseCostConfig",
     "PairwiseCostMatrix",
+    "UnmatchedProposal",
+    "UnmatchedReason",
     "associate_hungarian",
     "build_pairwise_cost_matrix",
     "solve_hungarian",

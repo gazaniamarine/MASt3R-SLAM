@@ -11,6 +11,7 @@ from fact3r.association import (
     HungarianEntityMapper,
     HungarianMapConfig,
     PairwiseCostConfig,
+    UnmatchedReason,
 )
 from fact3r.proposals.lift_to_3d import LiftedProposal
 from fact3r.proposals.storage import iter_saved_proposal_frames
@@ -171,6 +172,10 @@ class HungarianMappingIntegrationTests(unittest.TestCase):
         self.assertEqual(result.assignment.matches, ())
         self.assertEqual(result.created_entity_ids, ("entity-000001",))
         self.assertEqual(result.assignment.unmatched_entity_ids, ("entity-000000",))
+        self.assertEqual(
+            result.assignment.unmatched_proposals[0].reason,
+            UnmatchedReason.NO_SPATIAL_CANDIDATE,
+        )
         self.assertEqual(len(mapper.entities), 2)
 
 

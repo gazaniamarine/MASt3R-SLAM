@@ -9,7 +9,11 @@ from fact3r.association.costs import (
     PairwiseCostMatrix,
     build_pairwise_cost_matrix,
 )
-from fact3r.association.hungarian import associate_hungarian, solve_hungarian
+from fact3r.association.hungarian import (
+    UnmatchedReason,
+    associate_hungarian,
+    solve_hungarian,
+)
 from fact3r.entities.entity import Entity, EntityStatus
 from fact3r.proposals.lift_to_3d import LiftedProposal
 
@@ -134,6 +138,32 @@ class HungarianTests(unittest.TestCase):
         )
         self.assertEqual(result.unmatched_proposal_ids, ("p1",))
         self.assertEqual(result.unmatched_entity_ids, ("e1",))
+        self.assertEqual(
+            result.unmatched_proposals[0].reason,
+            UnmatchedReason.ASSIGNMENT_COMPETITION,
+        )
+        self.assertEqual(result.unmatched_proposals[0].best_entity_id, "e0")
+        self.assertAlmostEqual(result.unmatched_proposals[0].best_cost, 0.20)
+
+    def test_unmatched_reasons_distinguish_gating_and_cost_threshold(self) -> None:
+        matrix = self._manual_matrix([[np.inf, np.inf], [0.80, np.inf]])
+        result = solve_hungarian(matrix, max_match_cost=0.65)
+        self.assertEqual(
+            tuple(item.reason for item in result.unmatched_proposals),
+            (
+                UnmatchedReason.NO_SPATIAL_CANDIDATE,
+                UnmatchedReason.COST_ABOVE_THRESHOLD,
+            ),
+        )
+        self.assertEqual(
+            result.unmatched_reason_counts,
+            {
+                "empty_map": 0,
+                "no_spatial_candidate": 1,
+                "cost_above_threshold": 1,
+                "assignment_competition": 0,
+            },
+        )
 
     def test_end_to_end_association_is_one_to_one(self) -> None:
         proposals = [
@@ -157,6 +187,9 @@ class HungarianTests(unittest.TestCase):
         result = associate_hungarian([_proposal("p0", (0.0, 0.0, 1.0))], [])
         self.assertEqual(result.matches, ())
         self.assertEqual(result.unmatched_proposal_ids, ("p0",))
+        self.assertEqual(
+            result.unmatched_proposals[0].reason, UnmatchedReason.EMPTY_MAP
+        )
 
 
 if __name__ == "__main__":

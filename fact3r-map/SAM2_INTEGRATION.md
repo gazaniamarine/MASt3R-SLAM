@@ -126,6 +126,11 @@ This is intentionally a hard-assignment reference. Its entity fragmentation and
 identity switches are measurements for the later balanced/unbalanced transport
 models, not behavior that should be hidden with later memory rules.
 
+The Hungarian manifest version 2 also explains every created entity as an empty-map
+initialization, missing spatial candidate, above-threshold candidate, or one-to-one
+assignment competition. Re-running this stage over existing proposals does not
+require MASt3R-SLAM or SAM2 inference.
+
 ## Filtering performed before lifting
 
 The pipeline currently applies:
