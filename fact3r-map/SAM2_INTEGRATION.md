@@ -192,8 +192,8 @@ Reduce `--points-per-batch` if automatic mask generation runs out of GPU memory.
 - A SAM2 tracklet is only a short-term cue, not a persistent entity ID.
 
 Persistent identity is still decided jointly from lifted geometry, MASt3R evidence
-and the optional temporal cue. The next assignment milestone replaces hard
-Hungarian commitment with balanced and then unbalanced transport.
+and the optional temporal cue. The assignment stages now include hard Hungarian,
+balanced Sinkhorn, and visibility-conditioned unbalanced transport.
 
 ### 5. Run the balanced Sinkhorn comparison
 
@@ -214,7 +214,26 @@ diagnostics for every frame. Because this stage has neither dustbins nor relaxed
 marginals, `mean_forbidden_mass` is an expected diagnostic rather than hidden
 post-processing.
 
-### 6. Render association images
+### 6. Run visibility-conditioned residual transport
+
+This stage needs the keyframes again because it projects persistent entity geometry
+into the current view and depth-tests it before setting unbalanced entity demand.
+It does not rerun MASt3R-SLAM or SAM2:
+
+```bash
+python scripts/run_visibility_residual_transport.py \
+  --keyframes ../logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --tracklets ../logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/SCENE_NAME \
+  --output ../logs/hm3d/calib_fact3r/fact3r_visibility_residual_transport/SCENE_NAME
+```
+
+There is no dustbin row or column. Spatially forbidden pairs remain exactly zero.
+The output separates proposal birth/fragment/noise residual from visible-entity
+miss/occlusion residual, and records visibility, marginal relaxation, convergence,
+hard-decision confidence, and rejection reasons per frame.
+
+### 7. Render association images
 
 Compare mapping methods over the actual scene RGB and SAM2 masks:
 
@@ -224,6 +243,7 @@ python scripts/visualize_association.py \
   --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
   --mapping "Hungarian+tracklets=../logs/hm3d/calib_fact3r/fact3r_hungarian_tracklets/SCENE_NAME" \
   --mapping "Balanced Sinkhorn=../logs/hm3d/calib_fact3r/fact3r_balanced_sinkhorn/SCENE_NAME" \
+  --mapping "Visibility residual UOT=../logs/hm3d/calib_fact3r/fact3r_visibility_residual_transport/SCENE_NAME" \
   --output ../logs/hm3d/calib_fact3r/fact3r_association_visualization/SCENE_NAME
 ```
 

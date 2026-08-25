@@ -46,6 +46,7 @@ def _load_mapping(
     if payload.get("format") not in {
         "fact3r-hungarian-baseline",
         "fact3r-balanced-sinkhorn",
+        "fact3r-visibility-residual-transport",
     }:
         raise ValueError(f"unsupported mapping manifest {manifest_path}")
     return label, {

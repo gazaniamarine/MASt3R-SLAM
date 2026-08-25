@@ -369,6 +369,40 @@ such edges can never become hard matches. The runner reports this as
 `mean_forbidden_mass`, along with convergence and marginal error, making the
 failure mode explicit for the dustbin and unbalanced comparisons.
 
+#### Visibility-conditioned residual transport
+
+The first unbalanced model is implemented without a shared dustbin row, a shared
+dustbin column, or a learned scalar null logit. It is asymmetric because its two
+sides have different physical meanings: current SAM2 proposals are observations,
+while persistent entities are 3D map state.
+
+Before transport, each entity's stored geometry is projected into the current
+MASt3R keyframe. The current depth map separates visible surface from occluded or
+out-of-frustum surface. This visibility score sets both the entity's desired mass
+and how strongly its marginal is enforced. Proposal mass and marginal strength are
+conditioned on mask-to-3D point retention and optional SAM2 tracklet confidence.
+
+Generalized Sinkhorn scaling is then performed only on the original spatial
+candidate graph. Non-candidate entries remain `-inf` in the log kernel and exactly
+zero in the transport plan. The two directional residuals have explicit meanings:
+
+- proposal mass not transported is **birth/fragment/noise evidence**;
+- visible entity mass not supplied is **miss/occlusion evidence**.
+
+```bash
+python scripts/run_visibility_residual_transport.py \
+  --keyframes /path/to/fact3r_keyframes/scene \
+  --proposals /path/to/fact3r_sam2/scene \
+  --tracklets /path/to/fact3r_sam2_tracklets/scene \
+  --output /path/to/fact3r_visibility_residual_transport/scene
+```
+
+The runner saves visibility, desired and transported marginals, birth and miss
+residuals, excess mass, the strict-support plan, hard-decision confidence, and
+typed rejection reasons. Hard decisions are still immediate in this comparison
+stage; the next stage will accumulate birth and association evidence before
+creating or updating persistent entities.
+
 #### Image and temporal inspection
 
 Association manifests can be rendered directly over the exported RGB keyframes.
@@ -381,6 +415,7 @@ python scripts/visualize_association.py \
   --proposals /path/to/fact3r_sam2/scene \
   --mapping "Hungarian+tracklets=/path/to/fact3r_hungarian_tracklets/scene" \
   --mapping "Balanced Sinkhorn=/path/to/fact3r_balanced_sinkhorn/scene" \
+  --mapping "Visibility residual UOT=/path/to/fact3r_visibility_residual_transport/scene" \
   --output /path/to/fact3r_association_visualization/scene
 ```
 
@@ -391,11 +426,11 @@ output contains every comparison frame as PNG, a sampled
 `association_contact_sheet.png`, and an `association.gif` for temporal identity
 inspection.
 
-This same `PairwiseCostMatrix` is the input boundary for the balanced Sinkhorn,
-dustbin and unbalanced variants. Keeping the evidence fixed isolates the effect of
-the assignment model in later ablations. The private unmatched columns used by the
-Hungarian solver are only an implementation mechanism; they are not the learned or
-shared dustbins introduced by the transport model.
+This same `PairwiseCostMatrix` is the input boundary for Hungarian, balanced
+Sinkhorn and visibility-conditioned UOT. Keeping the evidence fixed isolates the
+effect of the assignment model. A shared learned dustbin remains useful as an
+ablation, but is not the central proposed mechanism. The private unmatched columns
+used internally by the Hungarian solver are only an implementation mechanism.
 
 ### 8.2 Point-level transport score
 
@@ -431,13 +466,29 @@ P^* =
 +\tau_c\mathrm{KL}(P^\top\mathbf 1\|b)
 \]
 
-The unbalanced formulation permits unmatched or partially matched mass. Include:
+The unbalanced formulation permits unmatched or partially matched mass without
+adding a shared null row or column. Set proposal evidence $a_i$ from retained 3D
+support and temporal confidence. Set entity demand $b_j$ from the fraction of its
+3D geometry predicted visible in the current depth map. Use per-node relaxation
+strengths so reliable proposals and clearly visible entities are enforced more
+strongly than weak masks and occluded entities.
 
-- a **new-entity dustbin** column;
-- an **unobserved-entity dustbin** row;
-- configurable entity capacity based on predicted visible surface area.
+For strict spatial support $S$, generalized Sinkhorn updates are:
 
-The method is inspired by partial assignment through differentiable optimal transport in [SuperGlue](https://openaccess.thecvf.com/content_CVPR_2020/html/Sarlin_SuperGlue_Learning_Feature_Matching_With_Graph_Neural_Networks_CVPR_2020_paper.html) and the connection between Hungarian matching and unbalanced transport described in [Unbalanced Optimal Transport](https://openaccess.thecvf.com/content/CVPR2023/html/De_Plaen_Unbalanced_Optimal_Transport_A_Unified_Framework_for_Object_Detection_CVPR_2023_paper.html).
+\[
+K_{ij}=\begin{cases}\exp(-C_{ij}/\epsilon)&(i,j)\in S\\0&\text{otherwise}\end{cases}
+\]
+
+\[
+u_i=\left(\frac{a_i}{(Kv)_i}\right)^{\tau_i^p/(\tau_i^p+\epsilon)},\qquad
+v_j=\left(\frac{b_j}{(K^\top u)_j}\right)^{\tau_j^e/(\tau_j^e+\epsilon)}
+\]
+
+This preserves exactly zero mass on impossible pairs. Positive proposal residual
+$a-P\mathbf 1$ is evidence for a new object, fragmentation or proposal noise;
+positive visible-entity residual $b-P^\top\mathbf 1$ is evidence for a missed or
+occluded entity. The direction and cause of null evidence are therefore retained
+instead of collapsed into a single learned scalar.
 
 ### 8.4 Delayed commitment
 
@@ -484,7 +535,7 @@ Action:
 
 #### New or temporarily hidden objects
 
-- high dustbin mass over multiple observations creates a new entity;
+- high proposal birth residual over multiple observations creates a new entity;
 - an unmatched existing entity remains inactive rather than being deleted;
 - reactivation requires descriptor and geometric consistency.
 
@@ -712,8 +763,8 @@ fact3r-map/
 ### Milestone 3 — Unbalanced transport
 
 - Implement balanced Sinkhorn.
-- Add dustbins.
-- Implement unbalanced marginal penalties.
+- Keep a shared-dustbin model as a controlled ablation.
+- Implement visibility-conditioned unbalanced marginal penalties.
 - Add delayed hard commitment.
 - Compare against Hungarian using identical pairwise costs.
 
@@ -908,15 +959,16 @@ Alternative title emphasizing the navigation task:
 
 ## 21. Immediate next actions
 
-- [ ] Set up MASt3R-SLAM inference and export keyframe pointmaps, poses, descriptors and confidence.
-- [ ] Define the `LiftedProposal`, `Entity` and `SemanticFact` schemas.
-- [ ] Visualize 2D masks lifted into the global reconstruction.
-- [ ] Implement geometric gating and a greedy association baseline.
-- [ ] Implement Hungarian assignment.
+- [x] Set up MASt3R-SLAM inference and export keyframe pointmaps, poses and confidence.
+- [x] Define the `LiftedProposal`, `Entity` and `SemanticFact` schemas.
+- [x] Visualize 2D masks lifted into the global reconstruction.
+- [ ] Add greedy association as an optional ablation.
+- [x] Implement geometric gating and Hungarian assignment.
 - [ ] Create a short sequence containing repeated object categories.
-- [ ] Add entity-ID visualization and association metrics.
-- [ ] Implement balanced Sinkhorn with dustbins.
-- [ ] Extend it to unbalanced transport.
+- [x] Add entity-ID visualization and assignment diagnostics.
+- [x] Implement balanced Sinkhorn and measure forbidden transport mass.
+- [x] Add strict-support, visibility-conditioned unbalanced transport.
+- [ ] Add a shared-dustbin ablation for comparison only.
 - [ ] Add delayed commitment and split/merge handling.
 - [ ] Only then add structured multi-view semantic extraction.
 

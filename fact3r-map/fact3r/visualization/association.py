@@ -71,7 +71,10 @@ def display_frame_from_manifest(entry: Mapping[str, object]) -> DisplayFrame:
         forbidden_mass=(
             None
             if "noncandidate_mass" not in entry
-            else float(entry["noncandidate_mass"])
+            and "forbidden_mass" not in entry
+            else float(
+                entry.get("noncandidate_mass", entry.get("forbidden_mass"))
+            )
         ),
     )
 

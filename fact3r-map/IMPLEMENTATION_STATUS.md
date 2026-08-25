@@ -7,7 +7,7 @@ This document distinguishes reusable functionality in the parent MASt3R-SLAM rep
 
 ## Summary
 
-The parent repository implements the MASt3R-SLAM geometry and tracking backbone. The new `fact3r-map` package completes Milestone 0 and now includes the first non-learned proposal-to-entity association baseline. It does **not** yet implement persistent entity lifecycle updates, transport association, or semantic mapping; Milestones 1–5 remain open.
+The parent repository implements the MASt3R-SLAM geometry and tracking backbone. The new `fact3r-map` package completes Milestone 0 and includes Hungarian, balanced-transport, and visibility-conditioned unbalanced proposal-to-entity association stages. It does **not** yet implement delayed persistent entity lifecycle updates or semantic mapping; Milestones 1–5 remain open.
 
 The reusable boundary is:
 
@@ -16,7 +16,7 @@ RGB input -> MASt3R inference -> keyframes -> pointmaps/confidence
           -> tracking/global poses -> loop closure -> reconstruction
 ```
 
-Fact3R now has validated keyframe, lifted-proposal, entity, and semantic-fact contracts; a read-only keyframe adapter; a finalized-keyframe disk export; official and Transformers SAM2 automatic mask generation; geometry-aware mask filtering; mask-to-world lifting; alignment and RGB association visualization; saved-proposal streaming; re-anchored official-SAM2 video tracklets; spatial proposal-entity gating; reusable multi-cue pairwise costs with an optional IoU-weighted temporal cue; exact Hungarian assignment; balanced log-domain Sinkhorn transport; and runnable complete-frame mappers. Persistent confirmation/inactive lifecycle behavior, dustbin/unbalanced transport, semantic extraction, BEV planning, and semantic querying still need to be implemented.
+Fact3R now has validated keyframe, lifted-proposal, entity, and semantic-fact contracts; a read-only keyframe adapter; a finalized-keyframe disk export; official and Transformers SAM2 automatic mask generation; geometry-aware mask filtering; mask-to-world lifting; alignment and RGB association visualization; saved-proposal streaming; re-anchored official-SAM2 video tracklets; spatial proposal-entity gating; reusable multi-cue pairwise costs with an optional IoU-weighted temporal cue; exact Hungarian assignment; balanced log-domain Sinkhorn transport; projected entity visibility; and strict-support visibility-conditioned unbalanced transport with directional birth/miss residuals. Persistent confirmation/inactive lifecycle behavior, delayed commitment, confidence-gated memory, semantic extraction, BEV planning, and semantic querying still need to be implemented.
 
 ## Reusable MASt3R-SLAM foundations
 
@@ -40,9 +40,9 @@ Fact3R now has validated keyframe, lifted-proposal, entity, and semantic-fact co
 | Milestone | Current status | Missing work |
 |---|---|---|
 | Milestone 0 — Freeze the interface | Complete | Added validated `KeyframeRecord`, `LiftedProposal`, `Entity`, and `SemanticFact` contracts; a read-only MASt3R frame adapter with explicit `D/Q` inputs; confidence-filtered mask lifting; a deterministic two-view sequence; numerical world-alignment tests; and a coloured PLY alignment exporter. The synthetic exit condition passes. Real-sequence model validation will be performed when Milestone 1 supplies masks. |
-| Milestone 1 — Entity mapping without learning | In progress | Implemented official/Transformers SAM2 proposal generation, filtering, offline keyframe export, 3D lifting and storage, saved-frame loading, adjacent-keyframe SAM2 mask propagation, one-to-one proposal tracklets, spatial gating, normalized geometry/colour/descriptor/temporal costs, exact Hungarian assignment, immediate provisional-entity creation, geometry update, frame/entity manifests, and unmatched-reason diagnostics with best-candidate evidence. Still missing confirmation/inactive lifecycle rules, real-sequence tracklet/threshold calibration, complete-frame MASt3R vote aggregation, and persistent-ID visualization. |
+| Milestone 1 — Entity mapping without learning | In progress | Implemented official/Transformers SAM2 proposal generation, filtering, offline keyframe export, 3D lifting and storage, saved-frame loading, adjacent-keyframe SAM2 mask propagation, one-to-one proposal tracklets, spatial gating, normalized geometry/colour/descriptor/temporal costs, exact Hungarian assignment, immediate provisional-entity creation, geometry update, frame/entity manifests, unmatched-reason diagnostics, and persistent-ID RGB/GIF visualization. Still missing confirmation/inactive lifecycle rules, real-sequence tracklet/threshold calibration, and complete-frame MASt3R vote aggregation. |
 | Milestone 2 — Split/merge robustness | Not started | No mixed-mask splitting, fragment merging, part hierarchy, inactive state, or entity reactivation. |
-| Milestone 3 — Unbalanced transport | In progress | Implemented balanced log-domain Sinkhorn with fixed uniform active marginals, preserved spatial/cost evidence, row-wise many-to-one hard commitment, convergence/marginal diagnostics, forbidden-mass measurement, saved transport plans, and an HM3D runner. Still missing dustbins, unbalanced marginal penalties, delayed commitment, confidence-gated memory, and full Hungarian-vs-UOT evaluation. |
+| Milestone 3 — Unbalanced transport | In progress | Implemented balanced log-domain Sinkhorn and a separate generalized Sinkhorn solver with per-proposal and per-entity KL relaxation. Entity demand is conditioned on current-view projection/depth visibility; proposal evidence uses lifted-point retention and optional tracklet confidence; forbidden edges retain exactly zero mass; directional birth/miss residuals, excess mass, confidence and rejection reasons are saved. A shared dustbin is retained only as a future ablation. Still missing a real-scene run, delayed commitment, confidence-gated memory, and full Hungarian-vs-UOT evaluation. |
 | Milestone 4 — Semantic facts | Not started | No view selection, structured fact extraction/fusion, point/part grounding, fact graph, or inspection tooling. |
 | Milestone 5 — Long-horizon retrieval and return | Not started | No BEV occupancy/traversability map, topology, entity-to-BEV links, goal-pose generation, query parser, graph matching, or navigation evaluation. |
 
@@ -52,7 +52,7 @@ The parent repository contains no non-third-party implementation matching these 
 
 - persistent object or part entities;
 - voxel filtering and stable mask-hierarchy extraction;
-- balanced or unbalanced Sinkhorn association;
+- delayed association belief and confidence-gated entity lifecycle updates;
 - temporal association beliefs, split/merge handling, or lifecycle states;
 - semantic fact extraction, fusion, provenance, or graph storage;
 - open-vocabulary semantic query parsing/retrieval;
@@ -60,4 +60,4 @@ The parent repository contains no non-third-party implementation matching these 
 
 ## First implementation step to take next
 
-Run `scripts/run_balanced_sinkhorn.py` over the existing HM3D proposals and tracklets, then compare entity growth, above-threshold failures, temporal-hint agreement, convergence and forbidden transport mass against the 399-entity geometry-only and 344-entity tracklet-Hungarian baselines. The next controlled change is explicit dustbin mass over the same `PairwiseCostMatrix`.
+Run `scripts/run_visibility_residual_transport.py` over the existing HM3D keyframes, proposals and tracklets. Compare entity growth, birth/miss residuals, ambiguity, temporal-hint agreement and visibility against the 399-entity geometry-only, 344-entity tracklet-Hungarian, and 338-entity balanced-Sinkhorn runs. Then use the saved residuals for delayed commitment; a shared learned dustbin should be evaluated only as a controlled ablation.

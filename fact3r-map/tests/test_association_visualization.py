@@ -17,6 +17,21 @@ from fact3r.visualization.association import (
 
 
 class AssociationVisualizationTests(unittest.TestCase):
+    def test_residual_transport_manifest_uses_exact_forbidden_mass(self) -> None:
+        frame = display_frame_from_manifest(
+            {
+                "frame_id": 2,
+                "entity_count_after": 3,
+                "matches": [],
+                "created_entity_ids": [],
+                "unmatched_proposals": [],
+                "converged": True,
+                "iterations": 12,
+                "forbidden_mass": 0.0,
+            }
+        )
+        self.assertEqual(frame.forbidden_mass, 0.0)
+
     def test_mapping_manifest_normalizes_matches_and_created_entities(self) -> None:
         frame = display_frame_from_manifest(
             {
