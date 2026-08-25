@@ -259,6 +259,25 @@ The output separates proposal birth/fragment/noise residual from visible-entity
 miss/occlusion residual, and records visibility, marginal relaxation, convergence,
 hard-decision confidence, and rejection reasons per frame.
 
+To enable the next lifecycle stage without overwriting that immediate-birth
+ablation, add `--delayed-commitment` and omit `--output`:
+
+```bash
+python scripts/run_visibility_residual_transport.py \
+  --keyframes ../logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --tracklets ../logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/SCENE_NAME \
+  --delayed-commitment
+```
+
+The default output becomes
+`../logs/hm3d/calib_fact3r/fact3r_delayed_commitment_uot/SCENE_NAME`.
+Unmatched residuals are accumulated by track ID. The default confirmation rule is
+three observations, mean normalized birth residual at least `0.55`, median link
+IoU at least `0.60`, and maximum adjacent 3D-centroid displacement of `0.30 m`.
+Single-frame fragments expire instead of creating entities, and an already
+committed track cannot create a duplicate after a temporary UOT rejection.
+
 ### 7. Render association images
 
 Compare mapping methods over the actual scene RGB and SAM2 masks:
@@ -270,10 +289,12 @@ python scripts/visualize_association.py \
   --mapping "Hungarian+tracklets=../logs/hm3d/calib_fact3r/fact3r_hungarian_tracklets/SCENE_NAME" \
   --mapping "Balanced Sinkhorn=../logs/hm3d/calib_fact3r/fact3r_balanced_sinkhorn/SCENE_NAME" \
   --mapping "Visibility residual UOT=../logs/hm3d/calib_fact3r/fact3r_visibility_residual_transport/SCENE_NAME" \
+  --mapping "Delayed UOT=../logs/hm3d/calib_fact3r/fact3r_delayed_commitment_uot/SCENE_NAME" \
   --output ../logs/hm3d/calib_fact3r/fact3r_association_visualization/SCENE_NAME
 ```
 
 This writes per-frame side-by-side PNGs, a contact sheet and an animated GIF.
 Stable entity colours expose identity switches; green boundaries denote reused
-entities and red boundaries denote newly created IDs. Use `--stride 2` for a
-smaller temporal sample or `--no-gif` when only full-resolution PNGs are needed.
+entities, red boundaries denote newly created IDs, yellow denotes pending tracks,
+and cyan denotes known tracks held without a memory update. Use `--stride 2` for
+a smaller temporal sample or `--no-gif` when only full-resolution PNGs are needed.

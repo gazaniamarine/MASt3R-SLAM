@@ -429,9 +429,84 @@ python scripts/run_visibility_residual_transport.py \
 
 The runner saves visibility, desired and transported marginals, birth and miss
 residuals, excess mass, the strict-support plan, hard-decision confidence, and
-typed rejection reasons. Hard decisions are still immediate in this comparison
-stage; the next stage will accumulate birth and association evidence before
-creating or updating persistent entities.
+typed rejection reasons. Omitting `--delayed-commitment` preserves immediate
+entity creation as the UOT ablation.
+
+#### Tracklet-conditioned delayed commitment
+
+The improved lifecycle keeps the same complete-frame UOT plan, candidate graph,
+costs and marginals. Only the interpretation of rejected proposal mass changes.
+An unmatched proposal with desired mass `a_i` and birth residual `r_i` contributes
+the normalized evidence
+
+```text
+rho_i = r_i / a_i
+```
+
+to a pending state keyed by its SAM2 track ID. For track `k`, the mapper maintains
+the mean `rho`, median adjacent mask IoU and maximum step between globally aligned
+3D centroids. A persistent entity is created only when all configured conditions
+hold. The defaults require three observations, mean residual ratio at least
+`0.55`, median link IoU at least `0.60`, and centroid steps no larger than `0.30`
+metres:
+
+```bash
+python scripts/run_visibility_residual_transport.py \
+  --keyframes /path/to/fact3r_keyframes/scene \
+  --proposals /path/to/fact3r_sam2/scene \
+  --tracklets /path/to/fact3r_sam2_tracklets/scene \
+  --delayed-commitment
+```
+
+One-frame pending tracks expire without entering the map. If UOT later rejects an
+observation from a track already tied to an entity, the observation is held for
+continuity but cannot create a duplicate and does not update entity memory. This
+separates delayed birth commitment from the later confidence-gated memory-update
+ablation. The default output is written under `fact3r_delayed_commitment_uot` so
+the immediate-UOT result is not overwritten.
+
+The manifest records every pending/confirmed/held decision, its accumulated
+statistics and blocking reasons, expired tracks, peak pending count, and final
+unresolved tracks.
+
+#### Real-rover multi-rate operation
+
+Camera rate and neural-map update rate should not be forced to match. Capture RGB
+at 30 FPS into a timestamped bounded queue, let tracking consume the newest frame
+at its sustainable rate, propagate existing masks more frequently, and run full
+automatic proposal discovery only periodically or on novelty. A practical initial
+desktop-GPU schedule is:
+
+| Component | Initial target |
+|---|---:|
+| Camera capture and recording | 30 FPS |
+| MASt3R-SLAM tracking | 10–15 FPS |
+| SAM2 video propagation of current tracks | 5–10 FPS |
+| Complete-frame automatic SAM2 discovery | 1–2 FPS |
+| 3D UOT/entity-map update on finalized keyframes | 2–5 FPS |
+
+These are deployment targets, not claimed end-to-end benchmarks. MASt3R-SLAM
+reports 15 FPS and its released implementation notes that experiments used an RTX
+4090. Meta reports 39.5 FPS for compiled SAM 2.1 Hiera-L video inference on an
+A100; that figure is not the automatic mask generator used here, which evaluates
+a dense prompt grid and must be benchmarked separately on the rover computer.
+Running both large models on one GPU also introduces contention.
+
+Choose the tracking floor from motion as well as compute. If consecutive mapping
+frames should remain within translation `d_max` and rotation `theta_max`, use
+
+```text
+tracking_fps >= max(linear_speed / d_max, yaw_rate / theta_max)
+```
+
+For example, at `0.5 m/s` with `d_max = 0.04 m`, or at `45 deg/s` with
+`theta_max = 3 deg`, the floor is approximately 15 FPS. The capture thread can
+remain at 30 FPS while overloaded inference workers drop stale frames rather than
+building latency.
+
+References: [MASt3R-SLAM CVPR paper](https://openaccess.thecvf.com/content/CVPR2025/html/Murai_MASt3R-SLAM_Real-Time_Dense_SLAM_with_3D_Reconstruction_Priors_CVPR_2025_paper.html),
+[released MASt3R-SLAM implementation](https://github.com/rmurai0610/MASt3R-SLAM),
+and [official SAM 2 benchmarks](https://github.com/facebookresearch/sam2#model-description).
 
 #### Image and temporal inspection
 
@@ -449,10 +524,11 @@ python scripts/visualize_association.py \
   --output /path/to/fact3r_association_visualization/scene
 ```
 
-Entity colours are stable across frames. Green mask boundaries and `M` labels are
-matched observations; red boundaries and `N` labels are newly created entities.
-Sinkhorn panels also display convergence, iteration count and forbidden mass. The
-output contains every comparison frame as PNG, a sampled
+Entity colours are stable across frames. Green mask boundaries are matched
+observations; red boundaries are newly created entities; yellow boundaries are
+pending births coloured by track ID; cyan boundaries are observations held on an
+existing track without a memory update. Sinkhorn panels also display convergence,
+iteration count and forbidden mass. The output contains every comparison frame as PNG, a sampled
 `association_contact_sheet.png`, and an `association.gif` for temporal identity
 inspection.
 

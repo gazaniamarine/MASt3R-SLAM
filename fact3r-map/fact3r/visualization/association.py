@@ -26,6 +26,8 @@ class DisplayFrame:
     entity_count: int
     unmatched_reason_counts: Mapping[str, int]
     assignments: tuple[DisplayAssignment, ...]
+    pending_count: int = 0
+    held_count: int = 0
     converged: bool | None = None
     iterations: int | None = None
     forbidden_mass: float | None = None
@@ -52,6 +54,27 @@ def display_frame_from_manifest(entry: Mapping[str, object]) -> DisplayFrame:
                     status="created",
                 )
             )
+            continue
+        commitment_status = unmatched.get("commitment_status")
+        if commitment_status == "deferred" and unmatched.get("track_id") is not None:
+            assignments.append(
+                DisplayAssignment(
+                    proposal_id=str(unmatched["proposal_id"]),
+                    entity_id=str(unmatched["track_id"]),
+                    status="pending",
+                )
+            )
+        elif (
+            commitment_status == "held_existing"
+            and unmatched.get("resolved_entity_id") is not None
+        ):
+            assignments.append(
+                DisplayAssignment(
+                    proposal_id=str(unmatched["proposal_id"]),
+                    entity_id=str(unmatched["resolved_entity_id"]),
+                    status="held",
+                )
+            )
     return DisplayFrame(
         frame_id=int(entry["frame_id"]),
         matched_count=len(entry.get("matches", [])),
@@ -62,6 +85,8 @@ def display_frame_from_manifest(entry: Mapping[str, object]) -> DisplayFrame:
             for reason, count in entry.get("unmatched_reason_counts", {}).items()
         },
         assignments=tuple(assignments),
+        pending_count=sum(item.status == "pending" for item in assignments),
+        held_count=sum(item.status == "held" for item in assignments),
         converged=(
             None if "converged" not in entry else bool(entry["converged"])
         ),
@@ -115,7 +140,8 @@ def _rgb_uint8(rgb: NDArray[np.generic]) -> NDArray[np.uint8]:
 def _short_entity_id(entity_id: str) -> str:
     suffix = entity_id.rsplit("-", 1)[-1]
     try:
-        return f"E{int(suffix)}"
+        prefix = "T" if entity_id.startswith("track-") else "E"
+        return f"{prefix}{int(suffix)}"
     except ValueError:
         return entity_id[:12]
 
@@ -123,7 +149,8 @@ def _short_entity_id(entity_id: str) -> str:
 def _header_lines(title: str, frame: DisplayFrame) -> tuple[str, str]:
     first = (
         f"{title} | frame {frame.frame_id} | matched {frame.matched_count} | "
-        f"new {frame.created_count} | entities {frame.entity_count}"
+        f"new {frame.created_count} | pending {frame.pending_count} | "
+        f"held {frame.held_count} | entities {frame.entity_count}"
     )
     reasons = ", ".join(
         f"{name}={count}"
@@ -168,11 +195,12 @@ def render_association_panel(
 
     canvas = np.clip(canvas, 0, 255).astype(np.uint8)
     for assignment, mask in visible:
-        boundary_colour = (
-            np.asarray([40, 255, 80], dtype=np.uint8)
-            if assignment.status == "matched"
-            else np.asarray([255, 55, 55], dtype=np.uint8)
-        )
+        boundary_colour = {
+            "matched": np.asarray([40, 255, 80], dtype=np.uint8),
+            "created": np.asarray([255, 55, 55], dtype=np.uint8),
+            "pending": np.asarray([255, 210, 40], dtype=np.uint8),
+            "held": np.asarray([40, 220, 255], dtype=np.uint8),
+        }.get(assignment.status, np.asarray([255, 255, 255], dtype=np.uint8))
         canvas[mask_boundary(mask)] = boundary_colour
 
     header_height = 48

@@ -31,6 +31,10 @@ from fact3r.association.sinkhorn_mapper import (
     SinkhornFrameMappingResult,
 )
 from fact3r.association.residual_mapper import (
+    BirthCommitmentDecision,
+    BirthCommitmentStatus,
+    DelayedCommitmentConfig,
+    PendingBirthSummary,
     ResidualTransportFrameMappingResult,
     VisibilityResidualEntityMapper,
 )
@@ -61,6 +65,9 @@ __all__ = [
     "BalancedSinkhornConfig",
     "BalancedSinkhornEntityMapper",
     "BalancedSinkhornResult",
+    "BirthCommitmentDecision",
+    "BirthCommitmentStatus",
+    "DelayedCommitmentConfig",
     "FrameMappingResult",
     "HardMatch",
     "HungarianEntityMapper",
@@ -68,6 +75,7 @@ __all__ = [
     "HungarianResult",
     "PairwiseCostConfig",
     "PairwiseCostMatrix",
+    "PendingBirthSummary",
     "EntityVisibility",
     "ResidualTransportConfig",
     "ResidualTransportFrameMappingResult",

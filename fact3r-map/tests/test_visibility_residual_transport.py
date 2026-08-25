@@ -5,6 +5,8 @@ import unittest
 import numpy as np
 
 from fact3r.association import (
+    BirthCommitmentStatus,
+    DelayedCommitmentConfig,
     EntityVisibility,
     PairwiseCostMatrix,
     ResidualTransportConfig,
@@ -14,6 +16,7 @@ from fact3r.association import (
     estimate_entity_visibility,
     solve_residual_transport,
 )
+from fact3r.association.tracklets import TrackletObservation
 from fact3r.entities.entity import Entity, EntityStatus
 from fact3r.proposals.lift_to_3d import LiftedProposal
 from fact3r.reconstruction.keyframes import KeyframeRecord
@@ -91,6 +94,43 @@ def _proposal(proposal_id: str, keyframe: KeyframeRecord) -> LiftedProposal:
     )
 
 
+def _shifted_proposal(
+    proposal_id: str,
+    keyframe: KeyframeRecord,
+    shift_xyz: list[float],
+) -> LiftedProposal:
+    proposal = _proposal(proposal_id, keyframe)
+    return LiftedProposal(
+        proposal_id=proposal.proposal_id,
+        frame_id=proposal.frame_id,
+        timestamp=proposal.timestamp,
+        pixel_rc=proposal.pixel_rc,
+        points_world=proposal.points_world + np.asarray(shift_xyz),
+        colours_rgb=proposal.colours_rgb,
+        geometry_confidence=proposal.geometry_confidence,
+        mast3r_descriptors=proposal.mast3r_descriptors,
+        descriptor_confidence=proposal.descriptor_confidence,
+        source_mask_area=proposal.source_mask_area,
+    )
+
+
+def _tracklet(
+    proposal_id: str,
+    frame_id: int,
+    track_id: str,
+    *,
+    source_proposal_id: str | None = None,
+    link_iou: float | None = None,
+) -> TrackletObservation:
+    return TrackletObservation(
+        frame_id=frame_id,
+        proposal_id=proposal_id,
+        track_id=track_id,
+        source_proposal_id=source_proposal_id,
+        link_iou=link_iou,
+    )
+
+
 class VisibilityTests(unittest.TestCase):
     def test_projection_distinguishes_visible_occluded_and_out_of_view(self) -> None:
         pointmap = np.zeros((3, 3, 3), dtype=np.float32)
@@ -139,6 +179,152 @@ class ResidualTransportTests(unittest.TestCase):
         self.assertEqual(second.assignment.matches[0].entity_id, "entity-000000")
         self.assertEqual(second.created_entity_ids, ())
         self.assertEqual(len(mapper.entities), 1)
+
+    def test_delayed_birth_requires_repeated_tracklet_evidence(self) -> None:
+        mapper = VisibilityResidualEntityMapper(
+            delayed_commitment_config=DelayedCommitmentConfig(
+                min_observations=3,
+                min_mean_birth_residual_ratio=0.5,
+                min_median_link_iou=0.6,
+                max_centroid_step_m=0.1,
+            )
+        )
+        previous_id = None
+        results = []
+        for frame_id in range(3):
+            keyframe = _small_keyframe(frame_id)
+            proposal_id = f"proposal-{frame_id}"
+            observation = _tracklet(
+                proposal_id,
+                frame_id,
+                "track-stable",
+                source_proposal_id=previous_id,
+                link_iou=None if previous_id is None else 0.9,
+            )
+            results.append(
+                mapper.process_frame(
+                    (_proposal(proposal_id, keyframe),),
+                    keyframe=keyframe,
+                    tracklet_observations={proposal_id: observation},
+                )
+            )
+            previous_id = proposal_id
+
+        self.assertEqual(results[0].created_entity_ids, ())
+        self.assertEqual(
+            results[0].birth_decisions[0].status,
+            BirthCommitmentStatus.DEFERRED,
+        )
+        self.assertEqual(results[1].created_entity_ids, ())
+        self.assertEqual(results[2].created_entity_ids, ("entity-000000",))
+        self.assertEqual(
+            results[2].birth_decisions[0].status,
+            BirthCommitmentStatus.CONFIRMED,
+        )
+        self.assertEqual(results[2].birth_decisions[0].observation_count, 3)
+        self.assertAlmostEqual(
+            results[2].birth_decisions[0].median_link_iou, 0.9
+        )
+        self.assertEqual(results[2].pending_track_count_after, 0)
+        self.assertEqual(len(mapper.entities), 1)
+        self.assertEqual(mapper.entities[0].first_seen_timestamp, 0.0)
+        self.assertEqual(mapper.entities[0].last_seen_timestamp, 2.0)
+
+    def test_single_frame_pending_birth_expires_without_entity(self) -> None:
+        mapper = VisibilityResidualEntityMapper(
+            delayed_commitment_config=DelayedCommitmentConfig(
+                min_observations=3,
+                max_missed_frames=0,
+            )
+        )
+        first_keyframe = _small_keyframe(0)
+        mapper.process_frame(
+            (_proposal("first", first_keyframe),),
+            keyframe=first_keyframe,
+            tracklet_observations={
+                "first": _tracklet("first", 0, "track-one-frame")
+            },
+        )
+        second_keyframe = _small_keyframe(1)
+        second = mapper.process_frame(
+            (_proposal("second", second_keyframe),),
+            keyframe=second_keyframe,
+            tracklet_observations={
+                "second": _tracklet("second", 1, "track-new")
+            },
+        )
+        self.assertEqual(
+            second.expired_pending_track_ids, ("track-one-frame",)
+        )
+        self.assertEqual(len(mapper.entities), 0)
+        self.assertEqual(second.pending_track_count_after, 1)
+
+    def test_known_track_cannot_spawn_duplicate_after_uot_rejection(self) -> None:
+        mapper = VisibilityResidualEntityMapper(
+            delayed_commitment_config=DelayedCommitmentConfig(
+                min_observations=2,
+                min_mean_birth_residual_ratio=0.5,
+                min_median_link_iou=0.6,
+                max_centroid_step_m=0.1,
+            )
+        )
+        first_keyframe = _small_keyframe(0)
+        mapper.process_frame(
+            (_proposal("p0", first_keyframe),),
+            keyframe=first_keyframe,
+            tracklet_observations={"p0": _tracklet("p0", 0, "track-a")},
+        )
+        second_keyframe = _small_keyframe(1)
+        confirmed = mapper.process_frame(
+            (_proposal("p1", second_keyframe),),
+            keyframe=second_keyframe,
+            tracklet_observations={
+                "p1": _tracklet(
+                    "p1",
+                    1,
+                    "track-a",
+                    source_proposal_id="p0",
+                    link_iou=0.9,
+                )
+            },
+        )
+        self.assertEqual(confirmed.created_entity_ids, ("entity-000000",))
+
+        third_keyframe = _small_keyframe(2)
+        rejected = mapper.process_frame(
+            (_shifted_proposal("p2", third_keyframe, [5.0, 0.0, 0.0]),),
+            keyframe=third_keyframe,
+            tracklet_observations={
+                "p2": _tracklet(
+                    "p2",
+                    2,
+                    "track-a",
+                    source_proposal_id="p1",
+                    link_iou=0.9,
+                )
+            },
+        )
+        self.assertEqual(len(rejected.assignment.matches), 0)
+        self.assertEqual(rejected.created_entity_ids, ())
+        self.assertEqual(
+            rejected.birth_decisions[0].status,
+            BirthCommitmentStatus.HELD_EXISTING,
+        )
+        self.assertEqual(
+            rejected.birth_decisions[0].resolved_entity_id,
+            "entity-000000",
+        )
+        self.assertEqual(len(mapper.entities), 1)
+
+    def test_delayed_commitment_requires_complete_tracklet_observations(self) -> None:
+        mapper = VisibilityResidualEntityMapper(
+            delayed_commitment_config=DelayedCommitmentConfig()
+        )
+        keyframe = _small_keyframe(0)
+        with self.assertRaisesRegex(ValueError, "every proposal"):
+            mapper.process_frame(
+                (_proposal("missing", keyframe),), keyframe=keyframe
+            )
 
     def test_strict_support_keeps_forbidden_mass_exactly_zero(self) -> None:
         result = solve_residual_transport(

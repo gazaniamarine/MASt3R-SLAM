@@ -60,6 +60,36 @@ class AssociationVisualizationTests(unittest.TestCase):
         self.assertTrue(frame.converged)
         self.assertAlmostEqual(frame.forbidden_mass, 0.125)
 
+    def test_delayed_commitment_masks_remain_visible_while_pending(self) -> None:
+        frame = display_frame_from_manifest(
+            {
+                "frame_id": 17,
+                "entity_count_after": 1,
+                "matches": [],
+                "created_entity_ids": [],
+                "unmatched_proposals": [
+                    {
+                        "proposal_id": "pending-mask",
+                        "commitment_status": "deferred",
+                        "track_id": "track-000005",
+                        "created_entity_id": None,
+                    },
+                    {
+                        "proposal_id": "held-mask",
+                        "commitment_status": "held_existing",
+                        "resolved_entity_id": "entity-000000",
+                        "created_entity_id": None,
+                    },
+                ],
+            }
+        )
+        self.assertEqual(frame.pending_count, 1)
+        self.assertEqual(frame.held_count, 1)
+        self.assertEqual(
+            tuple(assignment.status for assignment in frame.assignments),
+            ("pending", "held"),
+        )
+
     def test_mask_boundary_marks_edge_but_not_interior(self) -> None:
         mask = np.zeros((7, 7), dtype=bool)
         mask[1:6, 1:6] = True

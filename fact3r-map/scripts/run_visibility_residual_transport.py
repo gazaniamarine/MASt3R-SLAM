@@ -17,6 +17,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from fact3r.association import (  # noqa: E402
+    BirthCommitmentStatus,
+    DelayedCommitmentConfig,
     HungarianMapConfig,
     PairwiseCostConfig,
     ResidualTransportConfig,
@@ -35,10 +37,17 @@ from fact3r.proposals.storage import (  # noqa: E402
 )
 
 
-def _default_output(proposal_directory: Path) -> Path:
+def _default_output(
+    proposal_directory: Path, *, delayed_commitment: bool
+) -> Path:
+    stage = (
+        "fact3r_delayed_commitment_uot"
+        if delayed_commitment
+        else "fact3r_visibility_residual_transport"
+    )
     return (
         proposal_directory.parent.parent
-        / "fact3r_visibility_residual_transport"
+        / stage
         / proposal_directory.name
     )
 
@@ -146,7 +155,25 @@ def main() -> None:
     parser.add_argument("--unknown-depth-visibility", type=float, default=0.0)
     parser.add_argument("--entity-voxel-size", type=float, default=0.04)
     parser.add_argument("--max-entity-points", type=int, default=4096)
+    parser.add_argument(
+        "--delayed-commitment",
+        action="store_true",
+        help=(
+            "accumulate unmatched birth residual by SAM2 track ID before "
+            "creating an entity"
+        ),
+    )
+    parser.add_argument("--birth-min-observations", type=int, default=3)
+    parser.add_argument(
+        "--birth-min-mean-residual-ratio", type=float, default=0.55
+    )
+    parser.add_argument("--birth-min-median-link-iou", type=float, default=0.60)
+    parser.add_argument("--birth-max-centroid-step", type=float, default=0.30)
+    parser.add_argument("--birth-max-missed-frames", type=int, default=0)
     args = parser.parse_args()
+
+    if args.delayed_commitment and args.tracklets is None:
+        raise ValueError("--delayed-commitment requires --tracklets")
 
     proposal_run = load_proposal_run_manifest(args.proposals)
     if proposal_run.get("backend") != "official":
@@ -182,13 +209,31 @@ def main() -> None:
         depth_tolerance_m=args.visibility_depth_tolerance,
         unknown_depth_visibility=args.unknown_depth_visibility,
     )
+    delayed_commitment_config = (
+        None
+        if not args.delayed_commitment
+        else DelayedCommitmentConfig(
+            min_observations=args.birth_min_observations,
+            min_mean_birth_residual_ratio=(
+                args.birth_min_mean_residual_ratio
+            ),
+            min_median_link_iou=args.birth_min_median_link_iou,
+            max_centroid_step_m=args.birth_max_centroid_step,
+            max_missed_frames=args.birth_max_missed_frames,
+        )
+    )
     mapper = VisibilityResidualEntityMapper(
-        map_config, transport_config, visibility_config
+        map_config,
+        transport_config,
+        visibility_config,
+        delayed_commitment_config,
     )
     tracklet_run = (
         None if args.tracklets is None else load_tracklet_run(args.tracklets)
     )
-    output = args.output or _default_output(args.proposals)
+    output = args.output or _default_output(
+        args.proposals, delayed_commitment=args.delayed_commitment
+    )
     output.mkdir(parents=True, exist_ok=True)
 
     frame_entries: list[dict[str, object]] = []
@@ -205,6 +250,12 @@ def main() -> None:
     miss_residual_sum = 0.0
     entity_mass_sum = 0.0
     fallback_frames = 0
+    deferred_observation_total = 0
+    confirmed_birth_total = 0
+    held_existing_total = 0
+    expired_pending_total = 0
+    resolved_pending_total = 0
+    peak_pending_track_count = 0
     sentinel = object()
 
     paired_frames = zip_longest(
@@ -253,6 +304,7 @@ def main() -> None:
             frame.proposals,
             keyframe=keyframe,
             temporal_hints=temporal_hints,
+            tracklet_observations=observations_by_proposal,
         )
         assignment = result.assignment
         current_proposal_entities = {
@@ -260,12 +312,9 @@ def main() -> None:
         }
         current_proposal_entities.update(
             {
-                frame.proposals[proposal_index].proposal_id: entity_id
-                for proposal_index, entity_id in zip(
-                    assignment.unmatched_proposal_indices,
-                    result.created_entity_ids,
-                    strict=True,
-                )
+                decision.proposal_id: decision.resolved_entity_id
+                for decision in result.birth_decisions
+                if decision.resolved_entity_id is not None
             }
         )
         honored_hints = {
@@ -294,7 +343,33 @@ def main() -> None:
         ):
             fallback_frames += 1
 
+        decision_status_counts = {
+            status.value: sum(
+                decision.status == status
+                for decision in result.birth_decisions
+            )
+            for status in BirthCommitmentStatus
+        }
+        deferred_observation_total += decision_status_counts[
+            BirthCommitmentStatus.DEFERRED.value
+        ]
+        confirmed_birth_total += decision_status_counts[
+            BirthCommitmentStatus.CONFIRMED.value
+        ]
+        held_existing_total += decision_status_counts[
+            BirthCommitmentStatus.HELD_EXISTING.value
+        ]
+        expired_pending_total += len(result.expired_pending_track_ids)
+        resolved_pending_total += len(result.resolved_pending_track_ids)
+        peak_pending_track_count = max(
+            peak_pending_track_count, result.pending_track_count_after
+        )
+
         evidence_file = _save_transport_evidence(output, result)
+        decisions_by_proposal = {
+            decision.proposal_id: decision
+            for decision in result.birth_decisions
+        }
         unmatched_entries = [
             {
                 "proposal_id": unmatched.proposal_id,
@@ -308,13 +383,59 @@ def main() -> None:
                         unmatched.proposal_index
                     ]
                 ),
-                "created_entity_id": created_entity_id,
+                "birth_residual_ratio": (
+                    float(
+                        assignment.proposal_birth_residuals[
+                            unmatched.proposal_index
+                        ]
+                        / assignment.proposal_masses[
+                            unmatched.proposal_index
+                        ]
+                    )
+                ),
+                "commitment_status": (
+                    decisions_by_proposal[unmatched.proposal_id].status.value
+                ),
+                "track_id": (
+                    decisions_by_proposal[unmatched.proposal_id].track_id
+                ),
+                "resolved_entity_id": (
+                    decisions_by_proposal[
+                        unmatched.proposal_id
+                    ].resolved_entity_id
+                ),
+                "created_entity_id": (
+                    decisions_by_proposal[
+                        unmatched.proposal_id
+                    ].created_entity_id
+                ),
+                "pending_observation_count": (
+                    decisions_by_proposal[
+                        unmatched.proposal_id
+                    ].observation_count
+                ),
+                "pending_mean_birth_residual_ratio": (
+                    decisions_by_proposal[
+                        unmatched.proposal_id
+                    ].mean_birth_residual_ratio
+                ),
+                "pending_median_link_iou": (
+                    decisions_by_proposal[
+                        unmatched.proposal_id
+                    ].median_link_iou
+                ),
+                "pending_max_centroid_step_m": (
+                    decisions_by_proposal[
+                        unmatched.proposal_id
+                    ].max_centroid_step_m
+                ),
+                "commitment_blocking_reasons": list(
+                    decisions_by_proposal[
+                        unmatched.proposal_id
+                    ].blocking_reasons
+                ),
             }
-            for unmatched, created_entity_id in zip(
-                assignment.unmatched_proposals,
-                result.created_entity_ids,
-                strict=True,
-            )
+            for unmatched in assignment.unmatched_proposals
         ]
         frame_entries.append(
             {
@@ -352,6 +473,14 @@ def main() -> None:
                     for match in assignment.matches
                 ],
                 "created_entity_ids": list(result.created_entity_ids),
+                "birth_commitment_status_counts": decision_status_counts,
+                "pending_track_count_after": result.pending_track_count_after,
+                "expired_pending_track_ids": list(
+                    result.expired_pending_track_ids
+                ),
+                "resolved_pending_track_ids": list(
+                    result.resolved_pending_track_ids
+                ),
                 "unmatched_reason_counts": reason_counts,
                 "unmatched_proposals": unmatched_entries,
                 "unobserved_entity_ids": list(assignment.unmatched_entity_ids),
@@ -371,6 +500,10 @@ def main() -> None:
             f"created={len(result.created_entity_ids)} "
             f"entities={result.entity_count_after} "
             f"unmatched[{reason_summary or 'none'}] "
+            f"commitment[pending={result.pending_track_count_after},"
+            f"confirmed={decision_status_counts['confirmed']},"
+            f"held={decision_status_counts['held_existing']},"
+            f"expired={len(result.expired_pending_track_ids)}] "
             f"residual[birth={assignment.proposal_birth_residuals.sum():.3f},"
             f"miss={assignment.entity_miss_residuals.sum():.3f}] "
             f"uot[converged={assignment.converged},"
@@ -383,7 +516,7 @@ def main() -> None:
     entity_entries = _save_entities(output, mapper.entities)
     output_manifest = {
         "format": "fact3r-visibility-residual-transport",
-        "version": 1,
+        "version": 2,
         "source_keyframes": str(args.keyframes.resolve()),
         "source_proposals": str(args.proposals.resolve()),
         "source_tracklets": (
@@ -394,6 +527,11 @@ def main() -> None:
         "map_config": asdict(map_config),
         "transport_config": asdict(transport_config),
         "visibility_config": asdict(visibility_config),
+        "delayed_commitment_config": (
+            None
+            if delayed_commitment_config is None
+            else asdict(delayed_commitment_config)
+        ),
         "frame_count": len(frame_entries),
         "entity_count": len(entity_entries),
         "matched_total": matched_total,
@@ -411,6 +549,18 @@ def main() -> None:
             0.0 if entity_mass_sum == 0.0 else miss_residual_sum / entity_mass_sum
         ),
         "visibility_fallback_frames": fallback_frames,
+        "deferred_birth_observation_total": deferred_observation_total,
+        "confirmed_birth_total": confirmed_birth_total,
+        "held_existing_observation_total": held_existing_total,
+        "expired_pending_track_total": expired_pending_total,
+        "resolved_pending_track_total": resolved_pending_total,
+        "peak_pending_track_count": peak_pending_track_count,
+        "final_pending_tracks": [
+            asdict(summary) for summary in mapper.pending_births
+        ],
+        "committed_track_entities": dict(
+            sorted(mapper.committed_track_entities.items())
+        ),
         "frames": frame_entries,
         "entities": entity_entries,
     }
@@ -433,6 +583,16 @@ def main() -> None:
         f"{output_manifest['entity_miss_residual_fraction']:.3f}, "
         "forbidden_mass=0"
     )
+    if delayed_commitment_config is not None:
+        print(
+            "Delayed commitment totals: "
+            f"deferred_observations={deferred_observation_total}, "
+            f"confirmed_births={confirmed_birth_total}, "
+            f"held_existing={held_existing_total}, "
+            f"expired_tracks={expired_pending_total}, "
+            f"peak_pending={peak_pending_track_count}, "
+            f"final_pending={len(mapper.pending_births)}"
+        )
     print(
         f"Tracklet hints: used={temporal_hint_total}, "
         f"honored={temporal_hint_honored_total}"
