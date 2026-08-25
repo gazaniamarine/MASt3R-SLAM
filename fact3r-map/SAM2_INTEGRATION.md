@@ -194,3 +194,22 @@ Reduce `--points-per-batch` if automatic mask generation runs out of GPU memory.
 Persistent identity is still decided jointly from lifted geometry, MASt3R evidence
 and the optional temporal cue. The next assignment milestone replaces hard
 Hungarian commitment with balanced and then unbalanced transport.
+
+### 5. Run the balanced Sinkhorn comparison
+
+Once the proposal and tracklet artifacts exist, no additional GPU inference is
+needed for balanced transport:
+
+```bash
+python scripts/run_balanced_sinkhorn.py \
+  --proposals ../logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --tracklets ../logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/SCENE_NAME \
+  --output ../logs/hm3d/calib_fact3r/fact3r_balanced_sinkhorn/SCENE_NAME
+```
+
+Defaults use entropy temperature `0.05`, 300 scaling iterations and marginal
+tolerance `1e-6`. The output saves the unchanged component costs, candidate mask,
+full transport plan, fixed marginals, row-wise hard commitments and numerical
+diagnostics for every frame. Because this stage has neither dustbins nor relaxed
+marginals, `mean_forbidden_mass` is an expected diagnostic rather than hidden
+post-processing.

@@ -345,6 +345,30 @@ proposal's assigned entity. Its IoU-weighted identity preference is added as a
 not force a match; contradictory geometry can still win or leave the proposal
 unmatched. Omitting `--tracklets` reproduces the geometry-first Hungarian baseline.
 
+#### Balanced Sinkhorn comparison
+
+The next implemented assignment baseline replaces the one-to-one Hungarian solve
+with balanced entropic transport while keeping the proposal-entity costs, spatial
+candidate mask, match-cost threshold and optional SAM2 temporal cue unchanged.
+The active proposal and entity marginals are fixed and uniform. Sinkhorn scaling is
+performed in the log domain, and each proposal immediately commits to the viable
+entity receiving its largest transport mass. Multiple proposal fragments may
+therefore update the same entity in one frame.
+
+```bash
+python scripts/run_balanced_sinkhorn.py \
+  --proposals /path/to/fact3r_sam2/scene \
+  --tracklets /path/to/fact3r_sam2_tracklets/scene \
+  --output /path/to/fact3r_balanced_sinkhorn/scene
+```
+
+This is deliberately not yet the final association model. There are no dustbins,
+unbalanced marginal penalties or delayed commitments. Fixed marginals can force
+some soft mass onto high-cost numerical stand-ins for forbidden edges, although
+such edges can never become hard matches. The runner reports this as
+`mean_forbidden_mass`, along with convergence and marginal error, making the
+failure mode explicit for the dustbin and unbalanced comparisons.
+
 This same `PairwiseCostMatrix` is the input boundary for the balanced Sinkhorn,
 dustbin and unbalanced variants. Keeping the evidence fixed isolates the effect of
 the assignment model in later ablations. The private unmatched columns used by the
