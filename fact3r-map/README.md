@@ -345,6 +345,36 @@ proposal's assigned entity. Its IoU-weighted identity preference is added as a
 not force a match; contradictory geometry can still win or leave the proposal
 unmatched. Omitting `--tracklets` reproduces the geometry-first Hungarian baseline.
 
+#### Dense one-second HM3D segmentation diagnostic
+
+The rendered HM3D robot trajectory is already a 30 FPS sequence. Sampling one
+frame per second would be sparser than the current SLAM keyframes, so the temporal
+diagnostic instead selects a one-second window and runs automatic SAM2 on every
+captured frame in that window. For example, frames 240–269 include the problematic
+staircase view around frame 248:
+
+```bash
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/run_hm3d_one_second_segmentation.py \
+  --sequence datasets/hm3d_seqs/00800-TEEsavR23oF \
+  --start-frame 240 \
+  --duration-seconds 1 \
+  --device 0 \
+  --points-per-batch 32
+```
+
+Each frame is segmented independently. Accepted masks are linked to the preceding
+frame only by one-to-one mask IoU, with no SAM2 video memory, 3D geometry, map
+entity, or UOT evidence. Stable track colours in `one_second_tracks.gif` therefore
+measure raw automatic-mask consistency under robot motion. The manifest reports
+proposal counts, adjacent link rate, median link IoU, track count and track-length
+histogram.
+
+This experiment is image-only and cannot feed the 3D mapper directly. Its purpose
+is to choose the next controlled change: high short-term stability supports
+accumulating tracklet evidence before UOT; rapid track creation means proposal
+stability must be improved before tuning the association solver.
+
 #### Balanced Sinkhorn comparison
 
 The next implemented assignment baseline replaces the one-to-one Hungarian solve

@@ -101,32 +101,86 @@ def filter_mask_proposals(
 ) -> list[MaskProposal2D]:
     """Apply image, MASt3R-confidence, component, and duplicate filtering."""
 
-    image_area = keyframe.image_shape[0] * keyframe.image_shape[1]
-    min_area = max(
-        config.min_area_pixels, int(np.ceil(config.min_area_fraction * image_area))
-    )
-    max_area = int(np.floor(config.max_area_fraction * image_area))
     if config.min_descriptor_confidence is not None:
         if keyframe.descriptor_confidence is None:
             raise ValueError(
                 "descriptor filtering requested, but exported keyframe has no Q map"
             )
+    allowed_pixels = (
+        keyframe.geometry_confidence > config.min_geometry_confidence
+    )
+    if config.min_descriptor_confidence is not None:
+        allowed_pixels &= (
+            keyframe.descriptor_confidence > config.min_descriptor_confidence
+        )
+    return _filter_with_allowed_pixels(
+        proposals,
+        image_shape=keyframe.image_shape,
+        expected_frame_id=keyframe.frame_id,
+        config=config,
+        allowed_pixels=allowed_pixels,
+    )
+
+
+def filter_image_mask_proposals(
+    proposals: list[MaskProposal2D],
+    image_shape: tuple[int, int],
+    config: MaskFilterConfig,
+    *,
+    frame_id: int | None = None,
+) -> list[MaskProposal2D]:
+    """Apply the shared mask cleanup without requiring reconstructed geometry.
+
+    This is intended for image-only temporal diagnostics. The resulting masks
+    cannot be lifted into the persistent 3D map until aligned geometry is supplied.
+    """
+
+    if config.min_descriptor_confidence is not None:
+        raise ValueError(
+            "descriptor confidence filtering is unavailable without a keyframe"
+        )
+    expected_frame_id = (
+        frame_id
+        if frame_id is not None
+        else (None if not proposals else proposals[0].frame_id)
+    )
+    return _filter_with_allowed_pixels(
+        proposals,
+        image_shape=image_shape,
+        expected_frame_id=expected_frame_id,
+        config=config,
+        allowed_pixels=None,
+    )
+
+
+def _filter_with_allowed_pixels(
+    proposals: list[MaskProposal2D],
+    *,
+    image_shape: tuple[int, int],
+    expected_frame_id: int | None,
+    config: MaskFilterConfig,
+    allowed_pixels: NDArray[np.bool_] | None,
+) -> list[MaskProposal2D]:
+    image_area = image_shape[0] * image_shape[1]
+    min_area = max(
+        config.min_area_pixels, int(np.ceil(config.min_area_fraction * image_area))
+    )
+    max_area = int(np.floor(config.max_area_fraction * image_area))
 
     cleaned: list[MaskProposal2D] = []
     for proposal in proposals:
-        if proposal.frame_id != keyframe.frame_id:
-            raise ValueError("proposal frame_id does not match keyframe")
-        if proposal.mask.shape != keyframe.image_shape:
-            raise ValueError("proposal mask shape does not match keyframe")
+        if (
+            expected_frame_id is not None
+            and proposal.frame_id != expected_frame_id
+        ):
+            raise ValueError("proposal frame_id does not match the expected frame")
+        if proposal.mask.shape != image_shape:
+            raise ValueError("proposal mask shape does not match the expected image")
         if proposal.score < config.min_score:
             continue
         mask = proposal.mask.copy()
-        mask &= keyframe.geometry_confidence > config.min_geometry_confidence
-        if config.min_descriptor_confidence is not None:
-            mask &= (
-                keyframe.descriptor_confidence
-                > config.min_descriptor_confidence
-            )
+        if allowed_pixels is not None:
+            mask &= allowed_pixels
         mask = erode_mask(mask, config.erosion_pixels)
         mask = remove_small_components(mask, config.min_component_pixels)
         area = int(mask.sum())
@@ -143,4 +197,3 @@ def filter_mask_proposals(
         ):
             kept.append(proposal)
     return kept
-

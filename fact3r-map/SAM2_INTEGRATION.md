@@ -120,6 +120,32 @@ The default output is `fact3r_sam2_tracklets/SCENE_NAME/manifest.json`. Reduce
 The manifest retains every proposal's track ID, incoming source proposal and link
 IoU, so the cue can be audited independently of 3D assignment.
 
+### 3a. Segment every captured frame in one second
+
+HM3D is rendered at 30 FPS. To inspect the segmentation itself under continuous
+robot motion, run automatic SAM2 independently on all 30 frames in a one-second
+window. This example covers the staircase keyframe near frame 248:
+
+```bash
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/run_hm3d_one_second_segmentation.py \
+  --sequence datasets/hm3d_seqs/00800-TEEsavR23oF \
+  --start-frame 240 \
+  --duration-seconds 1 \
+  --device 0 \
+  --points-per-batch 32
+```
+
+The default output is
+`logs/hm3d/one_second_sam2/00800-TEEsavR23oF/frames_000240_000269`.
+It contains every cleaned mask, per-frame overlays, a contact sheet, an animated
+GIF with stable short-term track colours, and a manifest with adjacent-frame IoU
+link statistics.
+
+This is intentionally a 2D diagnostic: adjacent automatic masks are linked
+directly by IoU, without SAM2 video propagation, MASt3R geometry or UOT. It tests
+whether mask fragmentation already occurs before persistent-map association.
+
 ### 4. Run the complete-frame Hungarian baseline
 
 The proposal builder defaults to Meta's official SAM2 backend. Once it has produced
