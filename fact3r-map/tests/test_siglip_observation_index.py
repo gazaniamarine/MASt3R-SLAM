@@ -18,6 +18,7 @@ from fact3r.semantics.observation_index import (
 )
 from fact3r.semantics.vlm_verification import (
     VLMVerification,
+    local_image_source,
     parse_verification_output,
     prepare_vlm_query,
     rank_vlm_candidates,
@@ -228,6 +229,14 @@ def _write_mapping(directory: Path) -> None:
 
 
 class SiglipObservationIndexTests(unittest.TestCase):
+    def test_qwen_local_image_source_is_plain_absolute_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "evidence image.jpg"
+            image.write_bytes(b"test")
+            source = local_image_source(image)
+            self.assertEqual(source, str(image.resolve()))
+            self.assertFalse(source.startswith("file://"))
+
     def test_qwen_json_is_extracted_and_validated(self) -> None:
         parsed = parse_verification_output(
             "```json\n"

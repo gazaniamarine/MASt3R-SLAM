@@ -135,6 +135,15 @@ def parse_verification_output(text: str) -> VLMVerification:
     return VLMVerification.from_mapping(enriched)
 
 
+def local_image_source(path: str | Path) -> str:
+    """Return the plain absolute path expected by Transformers image loaders."""
+
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Qwen evidence image does not exist: {resolved}")
+    return str(resolved)
+
+
 class Qwen3VLVerifier:
     """Lazy Hugging Face adapter for Qwen3-VL instruction models."""
 
@@ -216,7 +225,7 @@ class Qwen3VLVerifier:
         assert self._processor is not None
         assert self._torch is not None
         content: list[dict[str, str]] = [
-            {"type": "image", "image": path.resolve().as_uri()}
+            {"type": "image", "image": local_image_source(path)}
             for path in evidence_images
         ]
         content.append(
