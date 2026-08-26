@@ -24,7 +24,7 @@ def _default_output(index: Path, query: str) -> Path:
         character if character.isalnum() else "-" for character in query.lower()
     ).strip("-")
     index_directory = index if index.is_dir() else index.parent
-    return index_directory / "queries" / (safe_query or "query")
+    return index_directory / "queries" / f"{safe_query or 'query'}-verified"
 
 
 def main() -> None:
@@ -36,8 +36,32 @@ def main() -> None:
         "--device", default="auto", help="auto, cpu, mps, cuda, or CUDA index"
     )
     parser.add_argument("--max-entities", type=int, default=3)
-    parser.add_argument("--min-entity-score", type=float)
-    parser.add_argument("--entity-top-views", type=int, default=2)
+    parser.add_argument(
+        "--positive-prompt",
+        action="append",
+        help="repeatable positive prompt; defaults to an ensemble built from --query",
+    )
+    parser.add_argument(
+        "--confounder",
+        action="append",
+        help="repeatable visually confusable negative prompt",
+    )
+    parser.add_argument("--entity-top-views", type=int, default=3)
+    parser.add_argument("--min-supporting-views", type=int, default=2)
+    parser.add_argument("--min-view-margin", type=float, default=0.02)
+    parser.add_argument(
+        "--min-entity-margin",
+        "--min-entity-score",
+        dest="min_entity_margin",
+        type=float,
+        default=0.02,
+    )
+    parser.add_argument("--reference-mask-area", type=float, default=4096.0)
+    parser.add_argument(
+        "--include-unconfirmed",
+        action="store_true",
+        help="also rank pending/unassigned groups; disabled for navigation by default",
+    )
     parser.add_argument("--max-observations-per-entity", type=int)
     parser.add_argument("--gif-width", type=int, default=1000)
     parser.add_argument("--gif-duration-ms", type=int, default=400)
@@ -53,25 +77,37 @@ def main() -> None:
         output=output,
         encoder=encoder,
         max_entities=args.max_entities,
-        min_entity_score=args.min_entity_score,
         top_views=args.entity_top_views,
+        positive_prompts=args.positive_prompt,
+        negative_prompts=args.confounder,
+        confirmed_only=not args.include_unconfirmed,
+        min_supporting_views=args.min_supporting_views,
+        min_view_margin=args.min_view_margin,
+        min_entity_margin=args.min_entity_margin,
+        reference_mask_area=args.reference_mask_area,
         max_observations_per_entity=args.max_observations_per_entity,
         gif_width=args.gif_width,
         gif_duration_ms=args.gif_duration_ms,
     )
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    for entity in result["entities"]:
-        print(
-            f"rank {entity['rank']}: {entity['group_id']} "
-            f"score={entity['entity_score']:.3f} "
-            f"frames={len(entity['observations'])}"
-        )
+    if result["confident_match_found"]:
+        for entity in result["entities"]:
+            print(
+                f"rank {entity['rank']}: {entity['group_id']} "
+                f"margin={entity['entity_margin']:.3f} "
+                f"support={entity['supporting_view_count']}/"
+                f"{entity['observation_count']} "
+                f"frames={len(entity['observations'])}"
+            )
+    else:
+        print("No confirmed entity passed the semantic confidence gates.")
     print(
         f"Query took {result['timing']['total_query_seconds_excluding_model_load']:.2f}s "
         f"after model loading"
     )
     print(f"Open gallery: {output / 'index.html'}")
-    print(f"GIF: {output / 'matches.gif'}")
+    if result["gif"] is not None:
+        print(f"GIF: {output / str(result['gif'])}")
     print(f"Results: {result_path}")
 
 

@@ -14,6 +14,7 @@ from fact3r.semantics.observation_index import (
     masked_context_crop,
     _pooled_feature_value,
     query_observation_index,
+    rank_semantic_entity_groups,
 )
 
 
@@ -212,6 +213,43 @@ class SiglipObservationIndexTests(unittest.TestCase):
         np.testing.assert_array_equal(crop[1, 1], [200, 200, 200])
         np.testing.assert_array_equal(crop[0, 0], [127, 127, 127])
 
+    def test_confirmed_multiview_ranking_excludes_unassigned_singletons(self) -> None:
+        embeddings = np.asarray(
+            [[1.0, 0.0], [0.98, 0.02], [1.0, 0.0]], dtype=np.float32
+        )
+        observations = [
+            {
+                "group_id": "entity-clock",
+                "entity_id": "entity-clock",
+                "proposal_score": 1.0,
+                "mask_area": 4096,
+            },
+            {
+                "group_id": "entity-clock",
+                "entity_id": "entity-clock",
+                "proposal_score": 1.0,
+                "association_confidence": 1.0,
+                "mask_area": 4096,
+            },
+            {
+                "group_id": "observation-fragment",
+                "entity_id": None,
+                "proposal_score": 1.0,
+                "association_confidence": 1.0,
+                "mask_area": 4096,
+            },
+        ]
+        _, _, _, _, groups = rank_semantic_entity_groups(
+            embeddings,
+            observations,
+            np.asarray([[1.0, 0.0]], dtype=np.float32),
+            np.asarray([[0.0, 1.0]], dtype=np.float32),
+        )
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["group_id"], "entity-clock")
+        self.assertTrue(groups[0]["accepted"])
+        self.assertEqual(groups[0]["supporting_view_count"], 2)
+
     def test_clock_query_returns_every_view_of_committed_entity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -270,6 +308,20 @@ class SiglipObservationIndexTests(unittest.TestCase):
             self.assertTrue((query_output / "matches.gif").is_file())
             self.assertTrue((query_output / "contact_sheet.jpg").is_file())
             self.assertTrue((query_output / "index.html").is_file())
+
+            no_match_output = root / "no-match"
+            no_match_path = query_observation_index(
+                index=manifest_path,
+                query="lamp",
+                output=no_match_output,
+                encoder=encoder,
+                max_entities=1,
+            )
+            no_match = json.loads(no_match_path.read_text(encoding="utf-8"))
+            self.assertFalse(no_match["confident_match_found"])
+            self.assertEqual(no_match["entities"], [])
+            self.assertIsNone(no_match["gif"])
+            self.assertTrue((no_match_output / "index.html").is_file())
 
 
 if __name__ == "__main__":

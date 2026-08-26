@@ -783,14 +783,25 @@ conda run -n SAM2 python3 \
   fact3r-map/scripts/query_siglip_observations.py \
   --index logs/hm3d/calib_fact3r/fact3r_siglip_observations/00800-TEEsavR23oF \
   --query "a clock" \
+  --confounder "a ceiling fan" \
+  --confounder "a ceiling light" \
+  --confounder "a picture frame" \
+  --confounder "a smoke detector" \
   --max-entities 3 \
   --device 0
 ```
 
-Entity scores use the mean of their strongest views. After an entity is selected,
-the query renders every indexed observation belonging to that entity rather than
-only the highest-scoring crop. The output contains `results.json`, an HTML
-gallery, individual highlighted frames, a contact sheet and `matches.gif`.
+Navigation queries rank confirmed entities by default; pending and isolated masks
+cannot become return goals. Each view is scored by its positive-prompt similarity
+minus its strongest confounder similarity, then weighted by SAM confidence,
+association confidence and mask resolution. An entity must have at least two
+supporting views and pass both view- and entity-margin gates. Consequently,
+`--max-entities` is only an upper bound: the query can return no confident match.
+After an entity passes, every indexed observation belonging to it is rendered,
+not only its highest-scoring crop. The output contains `results.json`, an HTML
+gallery, highlighted frames and, when a match exists, a contact sheet and
+`matches.gif`. Use `--include-unconfirmed` only for diagnostic recall inspection,
+never for selecting a navigation target.
 
 ## 11. Semantic retrieval
 

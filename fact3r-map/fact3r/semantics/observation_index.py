@@ -216,6 +216,26 @@ class MappingAssignment:
     entity_id: str | None
     track_id: str | None
     status: str
+    association_confidence: float = 1.0
+
+
+def _association_confidence(
+    evidence: Mapping[str, object], *, default: float = 1.0
+) -> float:
+    for name in (
+        "conditional_probability",
+        "row_probability",
+        "retained_ratio",
+        "pending_mean_birth_residual_ratio",
+        "birth_residual_ratio",
+    ):
+        value = evidence.get(name)
+        if value is not None and np.isfinite(float(value)):
+            return float(np.clip(float(value), 0.0, 1.0))
+    cost = evidence.get("cost", evidence.get("best_cost"))
+    if cost is not None and np.isfinite(float(cost)):
+        return float(np.clip(1.0 - float(cost), 0.0, 1.0))
+    return float(np.clip(default, 0.0, 1.0))
 
 
 def _manifest_path(path: str | Path) -> Path:
@@ -255,6 +275,7 @@ def load_mapping_assignments(
                 entity_id=str(match["entity_id"]),
                 track_id=None if track_id is None else str(track_id),
                 status="matched",
+                association_confidence=_association_confidence(match),
             )
         for unmatched in frame.get("unmatched_proposals", []):
             proposal_id = str(unmatched["proposal_id"])
@@ -273,6 +294,7 @@ def load_mapping_assignments(
                 entity_id=None if entity_id is None else str(entity_id),
                 track_id=track_id,
                 status=str(status),
+                association_confidence=_association_confidence(unmatched),
             )
     return assignments
 
@@ -365,6 +387,7 @@ def build_observation_index(
                     "track_id": assignment.track_id,
                     "group_id": group_id,
                     "assignment_status": assignment.status,
+                    "association_confidence": assignment.association_confidence,
                     "proposal_score": float(proposal["score"]),
                     "mask_area": int(proposal["mask_area"]),
                     "bounding_box_xyxy": proposal.get("bounding_box_xyxy"),
@@ -490,6 +513,134 @@ def rank_observation_groups(
     return scores, groups
 
 
+def default_positive_prompts(query: str) -> tuple[str, ...]:
+    subject = query.strip()
+    return tuple(
+        dict.fromkeys(
+            (
+                subject,
+                f"a photo of {subject}",
+                f"a close-up photo of {subject}",
+                f"{subject} in an indoor scene",
+            )
+        )
+    )
+
+
+def default_negative_prompts() -> tuple[str, ...]:
+    return (
+        "an unrelated indoor object",
+        "background with no distinct object",
+        "an unrecognizable partial object fragment",
+    )
+
+
+def rank_semantic_entity_groups(
+    embeddings: FloatArray,
+    observations: Sequence[Mapping[str, object]],
+    positive_embeddings: FloatArray,
+    negative_embeddings: FloatArray,
+    *,
+    top_views: int = 3,
+    min_supporting_views: int = 2,
+    min_view_margin: float = 0.02,
+    min_entity_margin: float = 0.02,
+    reference_mask_area: float = 4096.0,
+    confirmed_only: bool = True,
+) -> tuple[
+    NDArray[np.float32],
+    NDArray[np.float32],
+    NDArray[np.float32],
+    NDArray[np.float32],
+    list[dict[str, object]],
+]:
+    """Rank entities with contrastive, quality-weighted multi-view evidence."""
+
+    if top_views <= 0:
+        raise ValueError("top_views must be positive")
+    if min_supporting_views <= 0:
+        raise ValueError("min_supporting_views must be positive")
+    if reference_mask_area <= 0.0:
+        raise ValueError("reference_mask_area must be positive")
+    vectors = _normalise_rows(embeddings)
+    positives = _normalise_rows(positive_embeddings)
+    negatives = _normalise_rows(negative_embeddings)
+    if positives.shape[1] != vectors.shape[1]:
+        raise ValueError("positive prompt and observation dimensions differ")
+    if negatives.shape[1] != vectors.shape[1]:
+        raise ValueError("negative prompt and observation dimensions differ")
+
+    positive_scores = np.asarray(
+        np.mean(vectors @ positives.T, axis=1), dtype=np.float32
+    )
+    negative_scores = np.asarray(
+        np.max(vectors @ negatives.T, axis=1), dtype=np.float32
+    )
+    margins = np.asarray(positive_scores - negative_scores, dtype=np.float32)
+    qualities = np.empty(len(observations), dtype=np.float32)
+    grouped: dict[str, list[int]] = defaultdict(list)
+    for index, observation in enumerate(observations):
+        entity_id = observation.get("entity_id")
+        if confirmed_only and entity_id is None:
+            qualities[index] = 0.0
+            continue
+        sam_confidence = float(
+            np.clip(float(observation.get("proposal_score", 1.0)), 0.0, 1.0)
+        )
+        association_confidence = float(
+            np.clip(
+                float(observation.get("association_confidence", 1.0)),
+                0.0,
+                1.0,
+            )
+        )
+        mask_area = max(0.0, float(observation.get("mask_area", 0.0)))
+        area_quality = min(1.0, np.sqrt(mask_area / reference_mask_area))
+        qualities[index] = sam_confidence * association_confidence * area_quality
+        group_id = entity_id or observation.get("track_id") or observation["group_id"]
+        grouped[str(group_id)].append(index)
+
+    groups: list[dict[str, object]] = []
+    for group_id, indices in grouped.items():
+        ordered = sorted(indices, key=lambda item: float(margins[item]), reverse=True)
+        supporting = [
+            index for index in ordered if float(margins[index]) >= min_view_margin
+        ]
+        evidence = (supporting or ordered)[: min(top_views, len(indices))]
+        evidence_weights = qualities[evidence].astype(np.float64)
+        if float(evidence_weights.sum()) <= 1e-12:
+            entity_margin = float(np.mean(margins[evidence]))
+        else:
+            entity_margin = float(
+                np.average(margins[evidence], weights=evidence_weights)
+            )
+        rejection_reasons: list[str] = []
+        if len(supporting) < min_supporting_views:
+            rejection_reasons.append("insufficient_supporting_views")
+        if entity_margin < min_entity_margin:
+            rejection_reasons.append("entity_margin_below_threshold")
+        first = observations[indices[0]]
+        groups.append(
+            {
+                "group_id": group_id,
+                "entity_id": first.get("entity_id"),
+                "track_id": first.get("track_id"),
+                "score": entity_margin,
+                "entity_margin": entity_margin,
+                "observation_count": len(indices),
+                "supporting_view_count": len(supporting),
+                "observation_indices": indices,
+                "supporting_observation_indices": supporting,
+                "ranked_observation_indices": ordered,
+                "mean_observation_quality": float(np.mean(qualities[indices])),
+                "accepted": not rejection_reasons,
+                "rejection_reasons": rejection_reasons,
+            }
+        )
+    groups.sort(key=lambda item: float(item["entity_margin"]), reverse=True)
+    return positive_scores, negative_scores, margins, qualities, groups
+
+
 def _slug(value: str) -> str:
     compact = re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-")
     return compact[:80] or "query"
@@ -502,8 +653,11 @@ def _render_match(
     query: str,
     group_id: str,
     frame_id: int,
-    observation_score: float,
-    entity_score: float,
+    positive_score: float,
+    negative_score: float,
+    semantic_margin: float,
+    observation_quality: float,
+    entity_margin: float,
 ) -> Image.Image:
     image = _rgb_uint8(rgb)
     selected = np.asarray(mask, dtype=bool)
@@ -513,7 +667,7 @@ def _render_match(
     highlight = np.asarray([40.0, 240.0, 100.0], dtype=np.float32)
     canvas[selected] = 0.55 * canvas[selected] + 0.45 * highlight
     canvas[mask_boundary(selected)] = [40.0, 255.0, 80.0]
-    header_height = 58
+    header_height = 78
     rendered = Image.new(
         "RGB", (image.shape[1], image.shape[0] + header_height), (20, 20, 20)
     )
@@ -526,8 +680,14 @@ def _render_match(
     )
     draw.text(
         (8, 31),
-        f"entity score={entity_score:.3f} | observation score={observation_score:.3f}",
+        f"entity margin={entity_margin:.3f} | view margin={semantic_margin:.3f} "
+        f"| quality={observation_quality:.3f}",
         fill=(190, 230, 200),
+    )
+    draw.text(
+        (8, 53),
+        f"positive={positive_score:.3f} | strongest confounder={negative_score:.3f}",
+        fill=(185, 200, 230),
     )
     return rendered
 
@@ -576,7 +736,7 @@ def _write_gallery_outputs(
             escape(str(path.relative_to(output))),
             escape(
                 f"{entry['group_id']} · frame {entry['frame_id']} · "
-                f"score {float(entry['observation_score']):.3f}"
+                f"margin {float(entry['semantic_margin']):.3f}"
             ),
         )
         for path, entry in rendered
@@ -592,6 +752,34 @@ def _write_gallery_outputs(
     )
 
 
+def _write_no_match_html(
+    output: Path,
+    *,
+    query: str,
+    rejected_groups: Sequence[Mapping[str, object]],
+) -> None:
+    rows = "".join(
+        "<tr><td>{}</td><td>{:.3f}</td><td>{}</td><td>{}</td></tr>".format(
+            escape(str(group["group_id"])),
+            float(group["entity_margin"]),
+            int(group["supporting_view_count"]),
+            escape(", ".join(str(item) for item in group["rejection_reasons"])),
+        )
+        for group in rejected_groups[:10]
+    )
+    (output / "index.html").write_text(
+        "<!doctype html><meta charset=\"utf-8\"><title>No confident match</title>"
+        "<style>body{background:#161616;color:#eee;font-family:sans-serif;max-width:1000px;"
+        "margin:40px auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid #555;"
+        "padding:8px;text-align:left}</style>"
+        f"<h1>No confident match for: {escape(query)}</h1>"
+        "<p>No confirmed entity passed both the view-support and contrastive-margin gates.</p>"
+        "<h2>Highest rejected candidates</h2><table><tr><th>Entity</th><th>Margin</th>"
+        f"<th>Supporting views</th><th>Reason</th></tr>{rows}</table>",
+        encoding="utf-8",
+    )
+
+
 def query_observation_index(
     *,
     index: str | Path,
@@ -600,17 +788,26 @@ def query_observation_index(
     encoder: VisionLanguageEncoder,
     max_entities: int = 3,
     min_entity_score: float | None = None,
-    top_views: int = 2,
+    top_views: int = 3,
+    positive_prompts: Sequence[str] | None = None,
+    negative_prompts: Sequence[str] | None = None,
+    confirmed_only: bool = True,
+    min_supporting_views: int = 2,
+    min_view_margin: float = 0.02,
+    min_entity_margin: float = 0.02,
+    reference_mask_area: float = 4096.0,
     max_observations_per_entity: int | None = None,
     gif_width: int = 1000,
     gif_duration_ms: int = 400,
 ) -> Path:
-    """Retrieve semantic entities and render every stored view of each result."""
+    """Retrieve verified semantic entities and render every stored view."""
 
     if not query.strip():
         raise ValueError("query cannot be empty")
     if max_entities <= 0:
         raise ValueError("max_entities must be positive")
+    if min_entity_score is not None:
+        min_entity_margin = min_entity_score
     if max_observations_per_entity is not None and max_observations_per_entity <= 0:
         raise ValueError("max_observations_per_entity must be positive")
     if gif_width <= 0 or gif_duration_ms <= 0:
@@ -622,44 +819,54 @@ def query_observation_index(
             f"query encoder {encoder.model_name!r} does not match index model "
             f"{manifest['model']!r}"
         )
-    text_started = perf_counter()
-    query_embedding = encoder.encode_text([query])
-    text_seconds = perf_counter() - text_started
-    scores, groups = rank_observation_groups(
-        embeddings,
-        manifest["observations"],
-        query_embedding,
-        top_views=top_views,
+    positive_prompts = tuple(
+        prompt.strip()
+        for prompt in (
+            default_positive_prompts(query)
+            if positive_prompts is None
+            else positive_prompts
+        )
+        if prompt.strip()
     )
-    if min_entity_score is not None:
-        groups = [
-            group for group in groups if float(group["score"]) >= min_entity_score
-        ]
-    selected_groups = groups[:max_entities]
-    if not selected_groups:
-        raise ValueError("no entity groups passed the requested score threshold")
+    negative_prompts = tuple(
+        prompt.strip()
+        for prompt in (
+            default_negative_prompts()
+            if negative_prompts is None
+            else negative_prompts
+        )
+        if prompt.strip()
+    )
+    if not positive_prompts:
+        raise ValueError("at least one positive prompt is required")
+    if not negative_prompts:
+        raise ValueError("at least one confounder prompt is required")
+    text_started = perf_counter()
+    text_embeddings = _normalise_rows(
+        encoder.encode_text([*positive_prompts, *negative_prompts])
+    )
+    text_seconds = perf_counter() - text_started
+    positive_scores, negative_scores, margins, qualities, groups = (
+        rank_semantic_entity_groups(
+            embeddings,
+            manifest["observations"],
+            text_embeddings[: len(positive_prompts)],
+            text_embeddings[len(positive_prompts) :],
+            top_views=top_views,
+            min_supporting_views=min_supporting_views,
+            min_view_margin=min_view_margin,
+            min_entity_margin=min_entity_margin,
+            reference_mask_area=reference_mask_area,
+            confirmed_only=confirmed_only,
+        )
+    )
+    accepted_groups = [group for group in groups if bool(group["accepted"])]
+    rejected_groups = [group for group in groups if not bool(group["accepted"])]
+    selected_groups = accepted_groups[:max_entities]
 
-    selected_rows: list[tuple[dict[str, object], dict[str, object]]] = []
-    observations = manifest["observations"]
-    for group in selected_groups:
-        indices = list(group["ranked_observation_indices"])
-        if max_observations_per_entity is not None:
-            indices = indices[:max_observations_per_entity]
-        indices.sort(key=lambda index_value: int(observations[index_value]["frame_id"]))
-        for observation_index in indices:
-            selected_rows.append((group, observations[observation_index]))
-
-    needed_frames = {int(row[1]["frame_id"]) for row in selected_rows}
-    keyframe_images = {
-        keyframe.frame_id: np.array(keyframe.rgb, copy=True)
-        for keyframe in iter_exported_keyframes(manifest["source_keyframes"])
-        if keyframe.frame_id in needed_frames
-    }
-    proposal_directory = Path(str(manifest["source_proposals"]))
     output_directory = Path(output)
-    frame_output = output_directory / "frames"
-    frame_output.mkdir(parents=True, exist_ok=True)
-    rendered: list[tuple[Path, dict[str, object]]] = []
+    output_directory.mkdir(parents=True, exist_ok=True)
+    observations = manifest["observations"]
     result_groups: list[dict[str, object]] = []
     result_group_lookup: dict[str, dict[str, object]] = {}
     for rank, group in enumerate(selected_groups, start=1):
@@ -668,73 +875,139 @@ def query_observation_index(
             "group_id": group["group_id"],
             "entity_id": group["entity_id"],
             "track_id": group["track_id"],
-            "entity_score": group["score"],
+            "entity_margin": group["entity_margin"],
+            "observation_count": group["observation_count"],
+            "supporting_view_count": group["supporting_view_count"],
+            "mean_observation_quality": group["mean_observation_quality"],
             "observations": [],
         }
         result_groups.append(result_group)
         result_group_lookup[str(group["group_id"])] = result_group
 
-    for render_index, (group, observation) in enumerate(selected_rows):
-        frame_id = int(observation["frame_id"])
-        rgb = keyframe_images.get(frame_id)
-        if rgb is None:
-            raise ValueError(f"keyframe {frame_id} is missing from the source export")
-        with np.load(
-            proposal_directory / str(observation["mask_file"]),
-            allow_pickle=False,
-        ) as evidence:
-            mask = np.array(evidence["mask"], dtype=bool, copy=True)
-        observation_index = int(observation["index"])
-        rendered_image = _render_match(
-            rgb,
-            mask,
-            query=query,
-            group_id=str(group["group_id"]),
-            frame_id=frame_id,
-            observation_score=float(scores[observation_index]),
-            entity_score=float(group["score"]),
-        )
-        filename = (
-            f"{render_index:04d}_{_slug(str(group['group_id']))}_"
-            f"frame_{frame_id:06d}.jpg"
-        )
-        path = frame_output / filename
-        rendered_image.save(path, quality=92)
-        result_observation = {
-            "proposal_id": observation["proposal_id"],
-            "frame_id": frame_id,
-            "timestamp": observation.get("timestamp"),
-            "observation_score": float(scores[observation_index]),
-            "image": str(path.relative_to(output_directory)),
+    selected_rows: list[tuple[dict[str, object], dict[str, object]]] = []
+    for group in selected_groups:
+        indices = list(group["ranked_observation_indices"])
+        if max_observations_per_entity is not None:
+            indices = indices[:max_observations_per_entity]
+        indices.sort(key=lambda index_value: int(observations[index_value]["frame_id"]))
+        for observation_index in indices:
+            selected_rows.append((group, observations[observation_index]))
+
+    rendered: list[tuple[Path, dict[str, object]]] = []
+    if selected_rows:
+        needed_frames = {int(row[1]["frame_id"]) for row in selected_rows}
+        keyframe_images = {
+            keyframe.frame_id: np.array(keyframe.rgb, copy=True)
+            for keyframe in iter_exported_keyframes(manifest["source_keyframes"])
+            if keyframe.frame_id in needed_frames
         }
-        result_group_lookup[str(group["group_id"])]["observations"].append(
-            result_observation
-        )
-        rendered.append(
-            (
-                path,
-                {
-                    "group_id": group["group_id"],
-                    **result_observation,
-                },
+        proposal_directory = Path(str(manifest["source_proposals"]))
+        frame_output = output_directory / "frames"
+        frame_output.mkdir(parents=True, exist_ok=True)
+        for render_index, (group, observation) in enumerate(selected_rows):
+            frame_id = int(observation["frame_id"])
+            rgb = keyframe_images.get(frame_id)
+            if rgb is None:
+                raise ValueError(
+                    f"keyframe {frame_id} is missing from the source export"
+                )
+            with np.load(
+                proposal_directory / str(observation["mask_file"]),
+                allow_pickle=False,
+            ) as evidence:
+                mask = np.array(evidence["mask"], dtype=bool, copy=True)
+            observation_index = int(observation["index"])
+            rendered_image = _render_match(
+                rgb,
+                mask,
+                query=query,
+                group_id=str(group["group_id"]),
+                frame_id=frame_id,
+                positive_score=float(positive_scores[observation_index]),
+                negative_score=float(negative_scores[observation_index]),
+                semantic_margin=float(margins[observation_index]),
+                observation_quality=float(qualities[observation_index]),
+                entity_margin=float(group["entity_margin"]),
             )
+            filename = (
+                f"{render_index:04d}_{_slug(str(group['group_id']))}_"
+                f"frame_{frame_id:06d}.jpg"
+            )
+            path = frame_output / filename
+            rendered_image.save(path, quality=92)
+            result_observation = {
+                "proposal_id": observation["proposal_id"],
+                "frame_id": frame_id,
+                "timestamp": observation.get("timestamp"),
+                "positive_score": float(positive_scores[observation_index]),
+                "strongest_confounder_score": float(
+                    negative_scores[observation_index]
+                ),
+                "semantic_margin": float(margins[observation_index]),
+                "observation_quality": float(qualities[observation_index]),
+                "supports_query": bool(
+                    margins[observation_index] >= min_view_margin
+                ),
+                "image": str(path.relative_to(output_directory)),
+            }
+            result_group_lookup[str(group["group_id"])]["observations"].append(
+                result_observation
+            )
+            rendered.append(
+                (
+                    path,
+                    {
+                        "group_id": group["group_id"],
+                        **result_observation,
+                    },
+                )
+            )
+
+        _write_gallery_outputs(
+            rendered,
+            output_directory,
+            query=query,
+            gif_width=gif_width,
+            gif_duration_ms=gif_duration_ms,
+        )
+    else:
+        _write_no_match_html(
+            output_directory,
+            query=query,
+            rejected_groups=rejected_groups,
         )
 
-    _write_gallery_outputs(
-        rendered,
-        output_directory,
-        query=query,
-        gif_width=gif_width,
-        gif_duration_ms=gif_duration_ms,
-    )
+    rejected_diagnostics = [
+        {
+            "group_id": group["group_id"],
+            "entity_id": group["entity_id"],
+            "entity_margin": group["entity_margin"],
+            "observation_count": group["observation_count"],
+            "supporting_view_count": group["supporting_view_count"],
+            "mean_observation_quality": group["mean_observation_quality"],
+            "rejection_reasons": group["rejection_reasons"],
+        }
+        for group in rejected_groups[:20]
+    ]
     result = {
         "format": "fact3r-semantic-query-results",
-        "version": 1,
+        "version": 2,
         "query": query,
         "source_index": str(manifest_path.resolve()),
         "model": encoder.model_name,
-        "entity_top_views": top_views,
+        "positive_prompts": list(positive_prompts),
+        "confounder_prompts": list(negative_prompts),
+        "ranking_config": {
+            "confirmed_only": confirmed_only,
+            "entity_top_views": top_views,
+            "min_supporting_views": min_supporting_views,
+            "min_view_margin": min_view_margin,
+            "min_entity_margin": min_entity_margin,
+            "reference_mask_area": reference_mask_area,
+        },
+        "confident_match_found": bool(result_groups),
         "selected_entity_count": len(result_groups),
+        "rejected_entity_count": len(rejected_groups),
         "rendered_observation_count": len(rendered),
         "timing": {
             "model_load_seconds": float(encoder.load_seconds),
@@ -742,9 +1015,10 @@ def query_observation_index(
             "total_query_seconds_excluding_model_load": perf_counter() - started,
         },
         "entities": result_groups,
+        "highest_rejected_entities": rejected_diagnostics,
         "gallery": "index.html",
-        "gif": "matches.gif",
-        "contact_sheet": "contact_sheet.jpg",
+        "gif": "matches.gif" if rendered else None,
+        "contact_sheet": "contact_sheet.jpg" if rendered else None,
     }
     result_path = output_directory / "results.json"
     result_path.write_text(

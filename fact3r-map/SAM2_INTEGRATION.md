@@ -324,10 +324,18 @@ conda run -n SAM2 python3 \
   fact3r-map/scripts/query_siglip_observations.py \
   --index logs/hm3d/calib_fact3r/fact3r_siglip_observations/SCENE_NAME \
   --query "a clock" \
+  --confounder "a ceiling fan" \
+  --confounder "a ceiling light" \
+  --confounder "a picture frame" \
+  --confounder "a smoke detector" \
   --device 0
 ```
 
-The output query directory contains `index.html`, `matches.gif`,
-`contact_sheet.jpg`, per-observation highlighted frames, and machine-readable
-scores in `results.json`. These are currently exported keyframe observations;
-full 30-FPS histories require the later intermediate-frame SAM2 propagation step.
+Confirmed entities are ranked using contrastive positive-versus-confounder
+margins, proposal/association/area quality and at least two supporting views. The
+runner can explicitly report no confident match instead of filling a requested
+top-k list with false positives. When a match exists, the output query directory
+contains `index.html`, `matches.gif`, `contact_sheet.jpg`, per-observation
+highlighted frames, and machine-readable scores in `results.json`. These are
+currently exported keyframe observations; full 30-FPS histories require the later
+intermediate-frame SAM2 propagation step.
