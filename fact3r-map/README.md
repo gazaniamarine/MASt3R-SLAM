@@ -803,6 +803,49 @@ gallery, highlighted frames and, when a match exists, a contact sheet and
 `matches.gif`. Use `--include-unconfirmed` only for diagnostic recall inspection,
 never for selecting a navigation target.
 
+#### Automatic Qwen3-VL verification (no hand-written confounders)
+
+For open-ended robot queries, use SigLIP as a high-recall shortlist and
+Qwen3-VL as a multi-view verifier. Install the extra dependency once:
+
+```bash
+conda run -n SAM2 pip install -e 'fact3r-map[vlm]'
+```
+
+Then query the existing observation index:
+
+```bash
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/query_vlm_verified_observations.py \
+  --index logs/hm3d/calib_fact3r/fact3r_siglip_observations/00800-TEEsavR23oF \
+  --query "a clock" \
+  --siglip-device 0 \
+  --vlm-model Qwen/Qwen3-VL-8B-Instruct \
+  --vlm-device-map auto \
+  --max-candidates 6 \
+  --evidence-views 3 \
+  --min-vlm-confidence 0.75 \
+  --min-vlm-supporting-views 2
+```
+
+This path does not ask for `--confounder` arguments. SigLIP first ranks only
+confirmed persistent entities using the positive query ensemble. It is unloaded
+before Qwen3-VL is loaded. For each shortlisted entity, Qwen receives up to three
+images; every image pairs the full frame with an enlarged crop and highlights the
+candidate mask in green. The VLM must return a structured `yes`, `no`, or
+`uncertain` verdict, confidence, supporting frame IDs, its predicted object and
+visually confusable labels. Acceptance requires `yes`, the confidence threshold,
+and at least two valid supporting views. Invalid or ambiguous model output fails
+closed.
+
+The output directory includes the candidate evidence, accepted/rejected verdicts,
+automatically discovered dynamic confounders, `results.json`, an HTML gallery and
+all stored observations of every accepted entity. VLM verdicts are cached under
+the observation index, so an identical model/query/entity/evidence request does
+not load or invoke Qwen again. Use `--force-reverify` only when a fresh verdict is
+needed. `--attention-implementation flash_attention_2 --vlm-dtype bfloat16` can
+be added on a compatible CUDA installation.
+
 ## 11. Semantic retrieval
 
 Convert a free-form query into a graph pattern.

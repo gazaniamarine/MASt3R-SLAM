@@ -16,6 +16,13 @@ from fact3r.semantics.observation_index import (
     query_observation_index,
     rank_semantic_entity_groups,
 )
+from fact3r.semantics.vlm_verification import (
+    VLMVerification,
+    parse_verification_output,
+    prepare_vlm_query,
+    rank_vlm_candidates,
+    verify_prepared_query,
+)
 
 
 class _ColourEncoder:
@@ -34,6 +41,34 @@ class _ColourEncoder:
         return np.asarray(
             [[1.0, 0.0] if "clock" in text.lower() else [0.0, 1.0] for text in texts],
             dtype=np.float32,
+        )
+
+
+class _EntityVerifier:
+    model_name = "test-entity-verifier"
+    load_seconds = 0.0
+
+    def __init__(self):
+        self.calls = []
+
+    def verify(self, *, query, entity_id, evidence_images, frame_ids):
+        self.calls.append((query, entity_id, tuple(frame_ids)))
+        if entity_id == "entity-clock":
+            return VLMVerification(
+                decision="yes",
+                confidence=0.94,
+                predicted_object="wall clock",
+                confusable_with=("picture frame",),
+                supporting_frames=tuple(frame_ids),
+                reason="The highlighted object is a clock in both views.",
+            )
+        return VLMVerification(
+            decision="no",
+            confidence=0.91,
+            predicted_object="blue wall panel",
+            confusable_with=("window",),
+            supporting_frames=(),
+            reason="The highlighted object is not a clock.",
         )
 
 
@@ -193,6 +228,20 @@ def _write_mapping(directory: Path) -> None:
 
 
 class SiglipObservationIndexTests(unittest.TestCase):
+    def test_qwen_json_is_extracted_and_validated(self) -> None:
+        parsed = parse_verification_output(
+            "```json\n"
+            '{"decision":"yes","confidence":0.91,'
+            '"predicted_object":"clock","confusable_with":["fan"],'
+            '"supporting_frames":[2,3],"reason":"visible hands"}'
+            "\n```"
+        )
+        self.assertEqual(parsed.decision, "yes")
+        self.assertAlmostEqual(parsed.confidence, 0.91)
+        self.assertEqual(parsed.supporting_frames, (2, 3))
+        with self.assertRaisesRegex(ValueError, "JSON"):
+            parse_verification_output("yes, probably")
+
     def test_transformers_pooled_output_container_is_unwrapped(self) -> None:
         pooled = np.ones((2, 4), dtype=np.float32)
         output = SimpleNamespace(
@@ -249,6 +298,23 @@ class SiglipObservationIndexTests(unittest.TestCase):
         self.assertEqual(groups[0]["group_id"], "entity-clock")
         self.assertTrue(groups[0]["accepted"])
         self.assertEqual(groups[0]["supporting_view_count"], 2)
+
+    def test_vlm_shortlist_is_positive_only_and_requires_persistence(self) -> None:
+        embeddings = np.asarray(
+            [[1.0, 0.0], [0.98, 0.02], [1.0, 0.0]], dtype=np.float32
+        )
+        observations = [
+            {"entity_id": "entity-clock", "mask_area": 4096},
+            {"entity_id": "entity-clock", "mask_area": 4096},
+            {"entity_id": None, "mask_area": 4096},
+        ]
+        _, _, groups = rank_vlm_candidates(
+            embeddings,
+            observations,
+            np.asarray([[1.0, 0.0]], dtype=np.float32),
+        )
+        self.assertEqual([item["entity_id"] for item in groups], ["entity-clock"])
+        self.assertEqual(groups[0]["evidence_observation_indices"], [0, 1])
 
     def test_clock_query_returns_every_view_of_committed_entity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -322,6 +388,48 @@ class SiglipObservationIndexTests(unittest.TestCase):
             self.assertEqual(no_match["entities"], [])
             self.assertIsNone(no_match["gif"])
             self.assertTrue((no_match_output / "index.html").is_file())
+
+    def test_vlm_verifier_filters_candidates_and_reuses_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            keyframes = root / "keyframes"
+            proposals = root / "proposals"
+            mapping = root / "mapping"
+            index = root / "index"
+            output = root / "vlm-query"
+            _write_keyframes(keyframes)
+            _write_proposals(proposals)
+            _write_mapping(mapping)
+            encoder = _ColourEncoder()
+            manifest_path = build_observation_index(
+                keyframes=keyframes,
+                proposals=proposals,
+                mapping=mapping,
+                output=index,
+                encoder=encoder,
+                batch_size=2,
+                context_fraction=0.0,
+                outside_mask_alpha=0.0,
+            )
+            prepared = prepare_vlm_query(
+                index=manifest_path,
+                query="clock",
+                output=output,
+                encoder=encoder,
+                max_candidates=2,
+            )
+            verifier = _EntityVerifier()
+            result_path = verify_prepared_query(prepared, verifier=verifier)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual([item["entity_id"] for item in result["entities"]], ["entity-clock"])
+            self.assertEqual(result["rendered_observation_count"], 2)
+            self.assertIn("blue wall panel", result["dynamic_confounders"])
+            self.assertTrue((output / "matches.gif").is_file())
+            self.assertEqual(len(verifier.calls), 2)
+
+            cached_verifier = _EntityVerifier()
+            verify_prepared_query(prepared, verifier=cached_verifier)
+            self.assertEqual(cached_verifier.calls, [])
 
 
 if __name__ == "__main__":

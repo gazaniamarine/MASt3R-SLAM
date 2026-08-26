@@ -339,3 +339,29 @@ contains `index.html`, `matches.gif`, `contact_sheet.jpg`, per-observation
 highlighted frames, and machine-readable scores in `results.json`. These are
 currently exported keyframe observations; full 30-FPS histories require the later
 intermediate-frame SAM2 propagation step.
+
+To avoid supplying query-specific confounders by hand, run the Qwen3-VL verifier
+on top of the same index:
+
+```bash
+conda run -n SAM2 pip install -e 'fact3r-map[vlm]'
+
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/query_vlm_verified_observations.py \
+  --index logs/hm3d/calib_fact3r/fact3r_siglip_observations/SCENE_NAME \
+  --query "a clock" \
+  --siglip-device 0 \
+  --vlm-device-map auto \
+  --max-candidates 6 \
+  --evidence-views 3 \
+  --min-vlm-confidence 0.75 \
+  --min-vlm-supporting-views 2
+```
+
+SigLIP proposes confirmed entities, then releases its accelerator memory. Qwen3-VL
+jointly inspects the highlighted full-frame and enlarged-crop evidence from
+multiple observations. It must identify the highlighted pixels themselves and
+return a structured verdict. Rejected predicted labels become dynamic
+confounders in `results.json`, decisions are cached, and accepted entities render
+their complete indexed frame history. This semantic verifier never modifies UOT
+association or persistent IDs.
