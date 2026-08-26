@@ -113,6 +113,65 @@ Text query → graph retrieval → entity location → BEV planning
 
 ## 6. Persistent map representation
 
+### End-to-end video map command
+
+The currently implemented geometric/entity/observation pipeline can be run from
+one finite MP4, AVI, MOV or directory of PNG frames:
+
+```bash
+bash scripts/run_fact3r_video.sh \
+  --video /path/to/room_walk.mp4 \
+  --map-name room-walk \
+  --sam2-env SAM2 \
+  --device 0
+```
+
+When camera intrinsics are known, add `--calib config/my_camera.yaml`. The runner
+executes and validates five resumable stages: MASt3R-SLAM keyframe export,
+complete-frame official SAM2 proposals, re-anchored SAM2 tracklets,
+visibility-conditioned delayed-commitment UOT mapping and SigLIP observation
+indexing. A stage with a completed manifest is reused on restart. The final
+bundle is:
+
+```text
+logs/fact3r_video/room-walk/map.json
+```
+
+`map.json` checks frame-count and artifact lineage consistency and records the
+paths to persistent entities and searchable observations. It represents the
+completed semantic entity map; metric BEV planning still requires calibrated
+scale and the navigation-layer construction described later in this document.
+
+Query several concepts while loading SigLIP only once:
+
+```bash
+conda run -n SAM2 python3 fact3r-map/scripts/query_video_map.py \
+  --map logs/fact3r_video/room-walk \
+  --mode fast \
+  --device 0 \
+  --query "a wall clock" \
+  --query "a ceiling fan" \
+  --query "a red chair"
+```
+
+For ambiguous small objects, use Qwen verification:
+
+```bash
+conda run -n SAM2 python3 fact3r-map/scripts/query_video_map.py \
+  --map logs/fact3r_video/room-walk \
+  --mode vlm \
+  --device 0 \
+  --query "a wall clock" \
+  --query "a ceiling fan"
+```
+
+VLM mode first prepares every query with one shared SigLIP load, releases that
+model, then loads Qwen once for all requested concepts. Up to three missing
+candidates are verified listwise in one multimodal request rather than one call
+per entity. Per-entity verdicts remain cached, invalid/missing structured output
+fails closed, and each query receives an HTML evidence gallery plus machine-
+readable `results.json`.
+
 ### 6.1 Navigation layer
 
 The BEV is used for geometry and planning, not as the primary semantic memory.
@@ -1171,8 +1230,9 @@ Alternative title emphasizing the navigation task:
 - [x] Implement balanced Sinkhorn and measure forbidden transport mass.
 - [x] Add strict-support, visibility-conditioned unbalanced transport.
 - [ ] Add a shared-dustbin ablation for comparison only.
-- [ ] Add delayed commitment and split/merge handling.
-- [ ] Only then add structured multi-view semantic extraction.
+- [x] Add confidence-gated delayed commitment using SAM2 tracklets.
+- [x] Add SigLIP observation memory and Qwen multi-view verification.
+- [ ] Add the full structured semantic-fact graph and calibrated BEV return layer.
 
 ---
 

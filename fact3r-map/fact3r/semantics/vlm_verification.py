@@ -29,7 +29,7 @@ from fact3r.visualization.association import mask_boundary
 
 
 FloatArray = NDArray[np.floating]
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 
 
 class EntityVerifier(Protocol):
@@ -91,6 +91,13 @@ class VLMVerification:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class EntityVerificationRequest:
+    entity_id: str
+    evidence_images: tuple[Path, ...]
+    frame_ids: tuple[int, ...]
+
+
 def build_verification_prompt(query: str, frame_ids: Sequence[int]) -> str:
     """Create the deliberately strict prompt used for every candidate."""
 
@@ -117,6 +124,41 @@ def build_verification_prompt(query: str, frame_ids: Sequence[int]) -> str:
     )
 
 
+def build_listwise_verification_prompt(
+    query: str, requests: Sequence[EntityVerificationRequest]
+) -> str:
+    """Prompt one VLM call to judge several persistent candidates independently."""
+
+    image_index = 1
+    candidate_lines = []
+    for request in requests:
+        end = image_index + len(request.evidence_images) - 1
+        candidate_lines.append(
+            f"- {request.entity_id}: images {image_index}-{end}, "
+            f"frame IDs {list(request.frame_ids)}"
+        )
+        image_index = end + 1
+    return (
+        "You are verifying object-memory retrieval candidates for a mobile robot. "
+        "Each candidate is one persistent 3D entity seen in multiple frames. "
+        "Each evidence image has a full-frame view on the left and an enlarged "
+        "crop on the right; the candidate itself is tinted bright green. Judge "
+        "only the highlighted pixels, never a nearby or background object.\n\n"
+        f"Target query: {json.dumps(query.strip())}\n"
+        "Candidate-to-image mapping:\n"
+        + "\n".join(candidate_lines)
+        + "\n\nJudge every candidate independently. Use uncertain when evidence is "
+        "incomplete. supporting_frames must contain only listed frame IDs that "
+        "visually support yes. For no, predicted_object must name what the "
+        "highlighted entity actually is. Return ONLY this JSON structure:\n"
+        '{"candidates":[{"entity_id":"exact supplied ID",'
+        '"decision":"yes|no|uncertain","confidence":0.0,'
+        '"predicted_object":"short noun phrase",'
+        '"confusable_with":["short noun phrase"],'
+        '"supporting_frames":[0],"reason":"short sentence"}]}'
+    )
+
+
 def parse_verification_output(text: str) -> VLMVerification:
     """Extract and validate the first JSON object produced by the VLM."""
 
@@ -133,6 +175,48 @@ def parse_verification_output(text: str) -> VLMVerification:
     enriched = dict(payload)
     enriched["raw_output"] = text
     return VLMVerification.from_mapping(enriched)
+
+
+def parse_listwise_verification_output(
+    text: str, entity_ids: Sequence[str]
+) -> dict[str, VLMVerification]:
+    """Parse a multi-candidate response and fail missing candidates closed."""
+
+    source = text.strip()
+    start = source.find("{")
+    if start < 0:
+        raise ValueError("VLM response did not contain a JSON object")
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(source[start:])
+    except json.JSONDecodeError as error:
+        raise ValueError("VLM response contained invalid JSON") from error
+    if not isinstance(payload, Mapping) or not isinstance(
+        payload.get("candidates"), Sequence
+    ):
+        raise ValueError("VLM response must contain a candidates array")
+    allowed = set(entity_ids)
+    parsed: dict[str, VLMVerification] = {}
+    for item in payload["candidates"]:
+        if not isinstance(item, Mapping):
+            continue
+        entity_id = str(item.get("entity_id", ""))
+        if entity_id not in allowed or entity_id in parsed:
+            continue
+        enriched = dict(item)
+        enriched["raw_output"] = text
+        parsed[entity_id] = VLMVerification.from_mapping(enriched)
+    for entity_id in entity_ids:
+        if entity_id not in parsed:
+            parsed[entity_id] = VLMVerification(
+                decision="uncertain",
+                confidence=0.0,
+                predicted_object="",
+                confusable_with=(),
+                supporting_frames=(),
+                reason="candidate missing from structured VLM output",
+                raw_output=text,
+            )
+    return parsed
 
 
 def local_image_source(path: str | Path) -> str:
@@ -169,6 +253,7 @@ class Qwen3VLVerifier:
         self._processor = None
         self._torch = None
         self._load_seconds = 0.0
+        self.listwise_batch_size = 2 if max_new_tokens < 192 else 3
 
     @property
     def model_name(self) -> str:
@@ -220,10 +305,6 @@ class Qwen3VLVerifier:
             raise ValueError("at least one evidence image is required")
         if len(evidence_images) != len(frame_ids):
             raise ValueError("evidence images and frame IDs must align")
-        self._ensure_loaded()
-        assert self._model is not None
-        assert self._processor is not None
-        assert self._torch is not None
         content: list[dict[str, str]] = [
             {"type": "image", "image": local_image_source(path)}
             for path in evidence_images
@@ -234,18 +315,91 @@ class Qwen3VLVerifier:
                 "text": build_verification_prompt(query, frame_ids),
             }
         )
-        messages = [
+        output = self._generate(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Follow the visual grounding instructions exactly and "
+                        "emit valid JSON only."
+                    ),
+                },
+                {"role": "user", "content": content},
+            ]
+        )
+        try:
+            return parse_verification_output(output)
+        except ValueError as error:
+            return VLMVerification(
+                decision="uncertain",
+                confidence=0.0,
+                predicted_object="",
+                confusable_with=(),
+                supporting_frames=(),
+                reason=f"invalid structured VLM output: {error}",
+                raw_output=output,
+            )
+
+    def verify_many(
+        self,
+        *,
+        query: str,
+        requests: Sequence[EntityVerificationRequest],
+    ) -> dict[str, VLMVerification]:
+        """Judge a small candidate set in one multimodal generation."""
+
+        if not requests:
+            return {}
+        content: list[dict[str, str]] = []
+        for request in requests:
+            if not request.evidence_images:
+                raise ValueError("each candidate needs evidence images")
+            if len(request.evidence_images) != len(request.frame_ids):
+                raise ValueError("evidence images and frame IDs must align")
+            content.extend(
+                {"type": "image", "image": local_image_source(path)}
+                for path in request.evidence_images
+            )
+        content.append(
             {
-                "role": "system",
-                "content": (
-                    "Follow the visual grounding instructions exactly and emit "
-                    "valid JSON only."
-                ),
-            },
-            {"role": "user", "content": content},
-        ]
+                "type": "text",
+                "text": build_listwise_verification_prompt(query, requests),
+            }
+        )
+        output = self._generate(
+            [
+                {
+                    "role": "system",
+                    "content": "Ground every verdict visually and emit valid JSON only.",
+                },
+                {"role": "user", "content": content},
+            ]
+        )
+        try:
+            return parse_listwise_verification_output(
+                output, [request.entity_id for request in requests]
+            )
+        except ValueError as error:
+            return {
+                request.entity_id: VLMVerification(
+                    decision="uncertain",
+                    confidence=0.0,
+                    predicted_object="",
+                    confusable_with=(),
+                    supporting_frames=(),
+                    reason=f"invalid structured VLM output: {error}",
+                    raw_output=output,
+                )
+                for request in requests
+            }
+
+    def _generate(self, messages: Sequence[Mapping[str, object]]) -> str:
+        self._ensure_loaded()
+        assert self._model is not None
+        assert self._processor is not None
+        assert self._torch is not None
         inputs = self._processor.apply_chat_template(
-            messages,
+            list(messages),
             tokenize=True,
             add_generation_prompt=True,
             return_dict=True,
@@ -263,24 +417,11 @@ class Qwen3VLVerifier:
             output_ids[len(input_ids) :]
             for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
         ]
-        output = self._processor.batch_decode(
+        return self._processor.batch_decode(
             trimmed,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0]
-        try:
-            return parse_verification_output(output)
-        except ValueError as error:
-            return VLMVerification(
-                decision="uncertain",
-                confidence=0.0,
-                predicted_object="",
-                confusable_with=(),
-                supporting_frames=(),
-                reason=f"invalid structured VLM output: {error}",
-                raw_output=output,
-            )
-
 
 def _normalise_rows(values: object) -> NDArray[np.float32]:
     array = np.asarray(values, dtype=np.float32)
@@ -679,7 +820,8 @@ def verify_prepared_query(
     cache.mkdir(parents=True, exist_ok=True)
     verification_seconds = 0.0
     cache_hits = 0
-    checked: list[dict[str, object]] = []
+    candidate_records: list[dict[str, object]] = []
+    pending_records: list[dict[str, object]] = []
     for candidate in prepared.candidates:
         entity_id = str(candidate["entity_id"])
         evidence_images = candidate["evidence_images"]
@@ -697,15 +839,60 @@ def verify_prepared_query(
             verification = VLMVerification.from_mapping(payload["verification"])
             cache_hits += 1
         else:
-            inference_started = perf_counter()
-            verification = verifier.verify(
-                query=prepared.query,
-                entity_id=entity_id,
-                evidence_images=evidence_images,
-                frame_ids=frame_ids,
+            verification = None
+        record = {
+            "candidate": candidate,
+            "entity_id": entity_id,
+            "evidence_images": evidence_images,
+            "frame_ids": frame_ids,
+            "cache_path": cache_path,
+            "cache_hit": was_cached,
+            "verification": verification,
+        }
+        candidate_records.append(record)
+        if verification is None:
+            pending_records.append(record)
+
+    verify_many = getattr(verifier, "verify_many", None)
+    listwise_batch_size = max(1, int(getattr(verifier, "listwise_batch_size", 1)))
+    for offset in range(0, len(pending_records), listwise_batch_size):
+        chunk = pending_records[offset : offset + listwise_batch_size]
+        inference_started = perf_counter()
+        if callable(verify_many) and len(chunk) > 1:
+            print(
+                f"Qwen verifying {len(chunk)} persistent candidates in one request "
+                f"({offset + 1}-{offset + len(chunk)} of {len(pending_records)})"
             )
-            verification_seconds += perf_counter() - inference_started
-            cache_path.write_text(
+            requests = [
+                EntityVerificationRequest(
+                    entity_id=str(record["entity_id"]),
+                    evidence_images=tuple(record["evidence_images"]),
+                    frame_ids=tuple(record["frame_ids"]),
+                )
+                for record in chunk
+            ]
+            chunk_verifications = verify_many(
+                query=prepared.query, requests=requests
+            )
+        else:
+            chunk_verifications = {}
+            for record in chunk:
+                print(
+                    f"Qwen verifying {record['entity_id']} "
+                    f"({offset + 1} of {len(pending_records)})"
+                )
+                chunk_verifications[str(record["entity_id"])] = verifier.verify(
+                    query=prepared.query,
+                    entity_id=str(record["entity_id"]),
+                    evidence_images=record["evidence_images"],
+                    frame_ids=record["frame_ids"],
+                )
+        verification_seconds += perf_counter() - inference_started
+        for record in chunk:
+            entity_id = str(record["entity_id"])
+            verification = chunk_verifications[entity_id]
+            record["verification"] = verification
+            Path(record["cache_path"]).write_text(
                 json.dumps(
                     {
                         "format": "fact3r-vlm-verification-cache",
@@ -714,7 +901,7 @@ def verify_prepared_query(
                         "query": prepared.query,
                         "model": verifier.model_name,
                         "entity_id": entity_id,
-                        "evidence_frames": frame_ids,
+                        "evidence_frames": record["frame_ids"],
                         "verification": asdict(verification),
                     },
                     indent=2,
@@ -722,6 +909,13 @@ def verify_prepared_query(
                 + "\n",
                 encoding="utf-8",
             )
+
+    checked: list[dict[str, object]] = []
+    for record in candidate_records:
+        candidate = record["candidate"]
+        verification = record["verification"]
+        frame_ids = record["frame_ids"]
+        assert isinstance(verification, VLMVerification)
         valid_supporting_frames = sorted(
             set(verification.supporting_frames).intersection(frame_ids)
         )
@@ -744,7 +938,7 @@ def verify_prepared_query(
                 "accepted": accepted,
                 "rejection_reasons": rejection_reasons,
                 "valid_supporting_frames": valid_supporting_frames,
-                "cache_hit": was_cached,
+                "cache_hit": bool(record["cache_hit"]),
             }
         )
     accepted = [candidate for candidate in checked if candidate["accepted"]][

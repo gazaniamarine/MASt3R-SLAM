@@ -83,7 +83,7 @@ Connect a realsense camera to the PC and run
 python main.py --dataset realsense --config config/base.yaml
 ```
 ## Running on a video
-Our system can process either MP4 videos or folders containing RGB images.
+Our system can process MP4/AVI/MOV/MKV/M4V videos or folders containing RGB images.
 ```
 python main.py --dataset <path/to/video>.mp4 --config config/base.yaml
 python main.py --dataset <path/to/folder> --config config/base.yaml
@@ -93,6 +93,21 @@ If the calibration parameters are known, you can specify them in intrinsics.yaml
 python main.py --dataset <path/to/video>.mp4 --config config/base.yaml --calib config/intrinsics.yaml
 python main.py --dataset <path/to/folder> --config config/base.yaml --calib config/intrinsics.yaml
 ```
+
+To continue from a finite video through Fact3R proposals, persistent UOT
+entities and a searchable observation map, use the resumable end-to-end runner:
+
+```bash
+bash scripts/run_fact3r_video.sh \
+  --video <path/to/video>.mp4 \
+  --map-name my-map \
+  --sam2-env SAM2 \
+  --device 0
+```
+
+The completed bundle is written to `logs/fact3r_video/my-map/map.json`; see
+[`fact3r-map/README.md`](fact3r-map/README.md) for fast and Qwen-verified query
+commands.
 
 ## Downloading Dataset
 ### TUM-RGBD Dataset

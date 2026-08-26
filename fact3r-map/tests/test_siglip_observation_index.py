@@ -19,6 +19,7 @@ from fact3r.semantics.observation_index import (
 from fact3r.semantics.vlm_verification import (
     VLMVerification,
     local_image_source,
+    parse_listwise_verification_output,
     parse_verification_output,
     prepare_vlm_query,
     rank_vlm_candidates,
@@ -48,12 +49,12 @@ class _ColourEncoder:
 class _EntityVerifier:
     model_name = "test-entity-verifier"
     load_seconds = 0.0
+    listwise_batch_size = 3
 
     def __init__(self):
         self.calls = []
 
-    def verify(self, *, query, entity_id, evidence_images, frame_ids):
-        self.calls.append((query, entity_id, tuple(frame_ids)))
+    def _answer(self, entity_id, frame_ids):
         if entity_id == "entity-clock":
             return VLMVerification(
                 decision="yes",
@@ -71,6 +72,19 @@ class _EntityVerifier:
             supporting_frames=(),
             reason="The highlighted object is not a clock.",
         )
+
+    def verify(self, *, query, entity_id, evidence_images, frame_ids):
+        self.calls.append((query, entity_id, tuple(frame_ids)))
+        return self._answer(entity_id, frame_ids)
+
+    def verify_many(self, *, query, requests):
+        self.calls.append(
+            ("many", query, tuple(request.entity_id for request in requests))
+        )
+        return {
+            request.entity_id: self._answer(request.entity_id, request.frame_ids)
+            for request in requests
+        }
 
 
 def _write_keyframes(directory: Path) -> None:
@@ -250,6 +264,18 @@ class SiglipObservationIndexTests(unittest.TestCase):
         self.assertEqual(parsed.supporting_frames, (2, 3))
         with self.assertRaisesRegex(ValueError, "JSON"):
             parse_verification_output("yes, probably")
+
+    def test_qwen_listwise_json_fails_missing_candidate_closed(self) -> None:
+        parsed = parse_listwise_verification_output(
+            '{"candidates":[{"entity_id":"entity-clock",'
+            '"decision":"yes","confidence":0.92,'
+            '"predicted_object":"clock","confusable_with":[],'
+            '"supporting_frames":[2,3],"reason":"clock face"}]}',
+            ["entity-clock", "entity-fan"],
+        )
+        self.assertEqual(parsed["entity-clock"].decision, "yes")
+        self.assertEqual(parsed["entity-fan"].decision, "uncertain")
+        self.assertEqual(parsed["entity-fan"].confidence, 0.0)
 
     def test_transformers_pooled_output_container_is_unwrapped(self) -> None:
         pooled = np.ones((2, 4), dtype=np.float32)
@@ -434,7 +460,10 @@ class SiglipObservationIndexTests(unittest.TestCase):
             self.assertEqual(result["rendered_observation_count"], 2)
             self.assertIn("blue wall panel", result["dynamic_confounders"])
             self.assertTrue((output / "matches.gif").is_file())
-            self.assertEqual(len(verifier.calls), 2)
+            self.assertEqual(
+                verifier.calls,
+                [("many", "clock", ("entity-clock", "entity-blue"))],
+            )
 
             cached_verifier = _EntityVerifier()
             verify_prepared_query(prepared, verifier=cached_verifier)

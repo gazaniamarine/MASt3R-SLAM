@@ -317,8 +317,16 @@ class MP4Dataset(MonocularDataset):
                 raise ValueError("Failed to read image")
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(self.dtype)
-        timestamp = idx / self.fps
-        self.timestamps.append(timestamp)
+        timestamp = idx * self.stride / self.fps
+        # get_img_shape() reads index 0 before the SLAM loop. Keep timestamps
+        # index-addressable so that probe does not shift every later frame.
+        while len(self.timestamps) < idx:
+            missing_index = len(self.timestamps)
+            self.timestamps.append(missing_index * self.stride / self.fps)
+        if idx < len(self.timestamps):
+            self.timestamps[idx] = timestamp
+        else:
+            self.timestamps.append(timestamp)
         return img
 
 
@@ -393,7 +401,7 @@ def load_dataset(dataset_path):
     if "webcam" in split_dataset_type:
         return Webcam()
 
-    ext = split_dataset_type[-1].split(".")[-1]
-    if ext in ["mp4", "avi", "MOV", "mov"]:
+    ext = pathlib.Path(split_dataset_type[-1]).suffix.lower()
+    if ext in {".mp4", ".avi", ".mov", ".mkv", ".m4v"}:
         return MP4Dataset(dataset_path)
     return RGBFiles(dataset_path)
