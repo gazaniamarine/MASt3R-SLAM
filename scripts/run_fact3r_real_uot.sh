@@ -16,7 +16,7 @@ device="0"
 sample_fps="2"
 max_frames=""
 query=""
-points_per_side="32"
+points_per_side="64"
 points_per_batch="32"
 max_seeds_per_batch="16"
 siglip_batch_size="32"
@@ -31,6 +31,7 @@ usage() {
     echo "  --mast3r-env NAME          optional conda env for MASt3R matching"
     echo "  --sam2-env NAME            segmentation/index env (default: SAM2)"
     echo "  --device DEVICE            CUDA device/index (default: 0)"
+    echo "  --points-per-side N        dense SAM2 prompt grid (default: 64)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -101,7 +102,13 @@ if [[ ! -f "$proposals/manifest.json" ]]; then
     "${sam2_python[@]}" fact3r-map/scripts/build_sam2_proposals.py \
         --keyframes "$frames" --output "$proposals" --backend official \
         --device "$device" --points-per-side "$points_per_side" \
-        --points-per-batch "$points_per_batch"
+        --points-per-batch "$points_per_batch" \
+        --pred-iou-threshold 0.75 \
+        --stability-score-threshold 0.85 \
+        --min-area-pixels 40 \
+        --min-area-fraction 0.0002 \
+        --erosion-pixels 0 \
+        --min-component-pixels 20
 else
     echo "[2/7] Reusing SAM2 proposals"
 fi
@@ -119,7 +126,8 @@ if [[ ! -f "$appearance/manifest.json" ]]; then
     echo "[4/7] Encoding mask observations with SigLIP"
     "${sam2_python[@]}" fact3r-map/scripts/build_siglip_observation_index.py \
         --keyframes "$frames" --proposals "$proposals" --tracklets "$tracklets" \
-        --output "$appearance" --device "$device" --batch-size "$siglip_batch_size"
+        --output "$appearance" --device "$device" --batch-size "$siglip_batch_size" \
+        --context-fraction 0.02 --outside-mask-alpha 0.0
 else
     echo "[4/7] Reusing SigLIP observations"
 fi
@@ -156,8 +164,9 @@ echo "  observations: $observations"
 echo "  UOT map:      $mapping"
 if [[ -n "$query" ]]; then
     "${sam2_python[@]}" fact3r-map/scripts/query_siglip_observations.py \
-        --index "$observations" --query "$query" --device "$device"
+        --index "$observations" --query "$query" --device "$device" \
+        --no-map-hard-negatives
 else
     echo "Query command:"
-    echo "  conda run -n $sam2_environment python3 fact3r-map/scripts/query_siglip_observations.py --index '$observations' --query 'a chair' --device '$device'"
+    echo "  conda run -n $sam2_environment python3 fact3r-map/scripts/query_siglip_observations.py --index '$observations' --query 'a chair' --device '$device' --no-map-hard-negatives"
 fi
