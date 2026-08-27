@@ -153,10 +153,19 @@ if [[ ! -f "$keyframes/manifest.json" ]]; then
     exit 1
 fi
 
-if [[ -f "$proposals/manifest.json" ]]; then
+proposal_has_dual_memory=false
+if [[ -f "$proposals/manifest.json" ]] && \
+    grep -Fq '"version": 2' "$proposals/manifest.json"; then
+    proposal_has_dual_memory=true
+fi
+if [[ "$proposal_has_dual_memory" == true ]]; then
     echo "[2/6] Reusing official SAM2 proposals: $proposals"
 else
-    echo "[2/6] Generating complete-frame SAM2 proposals"
+    if [[ -f "$proposals/manifest.json" ]]; then
+        echo "[2/6] Rebuilding proposals to retain 2D-only observations"
+    else
+        echo "[2/6] Generating complete-frame SAM2 proposals"
+    fi
     "${mapping_python[@]}" fact3r-map/scripts/build_sam2_proposals.py \
         --keyframes "$keyframes" \
         --output "$proposals" \
@@ -166,7 +175,8 @@ else
         --points-per-batch "$points_per_batch"
 fi
 
-if [[ -f "$tracklets/manifest.json" ]]; then
+if [[ -f "$tracklets/manifest.json" && \
+    ! "$proposals/manifest.json" -nt "$tracklets/manifest.json" ]]; then
     echo "[3/6] Reusing SAM2 short-term tracklets: $tracklets"
 else
     echo "[3/6] Building re-anchored SAM2 tracklets"
@@ -184,7 +194,9 @@ else
     "${tracklet_command[@]}"
 fi
 
-if [[ -f "$appearance_index/manifest.json" ]]; then
+if [[ -f "$appearance_index/manifest.json" && \
+    ! "$proposals/manifest.json" -nt "$appearance_index/manifest.json" && \
+    ! "$tracklets/manifest.json" -nt "$appearance_index/manifest.json" ]]; then
     echo "[4/6] Reusing pre-UOT SigLIP appearance index: $appearance_index"
 else
     echo "[4/6] Encoding pre-UOT SigLIP appearance memory"
@@ -192,6 +204,7 @@ else
         fact3r-map/scripts/build_siglip_observation_index.py \
         --keyframes "$keyframes" \
         --proposals "$proposals" \
+        --tracklets "$tracklets" \
         --output "$appearance_index" \
         --device "$device" \
         --batch-size "$siglip_batch_size"
@@ -200,7 +213,8 @@ fi
 mapping_has_appearance=false
 if [[ -f "$mapping/manifest.json" ]] && \
     grep -Fq "\"source_appearance_index\": \"$appearance_index/manifest.json\"" \
-        "$mapping/manifest.json"; then
+        "$mapping/manifest.json" && \
+    ! "$appearance_index/manifest.json" -nt "$mapping/manifest.json"; then
     mapping_has_appearance=true
 fi
 if [[ "$mapping_has_appearance" == true ]]; then

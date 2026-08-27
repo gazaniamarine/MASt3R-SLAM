@@ -22,9 +22,15 @@ class MaskFilterConfig:
     duplicate_iou_threshold: float = 0.9
     min_geometry_confidence: float = 0.0
     min_descriptor_confidence: float | None = None
+    min_lifted_points: int = 16
+    full_anchor_coverage: float = 0.50
 
     def __post_init__(self) -> None:
-        if self.min_area_pixels < 1 or self.min_component_pixels < 1:
+        if (
+            self.min_area_pixels < 1
+            or self.min_component_pixels < 1
+            or self.min_lifted_points < 1
+        ):
             raise ValueError("pixel thresholds must be positive")
         if self.erosion_pixels < 0:
             raise ValueError("erosion_pixels cannot be negative")
@@ -32,6 +38,7 @@ class MaskFilterConfig:
             "min_area_fraction",
             "max_area_fraction",
             "duplicate_iou_threshold",
+            "full_anchor_coverage",
         ):
             value = getattr(self, name)
             if not 0.0 <= value <= 1.0:

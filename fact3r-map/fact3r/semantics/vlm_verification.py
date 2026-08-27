@@ -471,7 +471,9 @@ def rank_vlm_candidates(
     grouped: dict[str, list[int]] = {}
     for index, observation in enumerate(observations):
         entity_id = observation.get("entity_id")
-        if entity_id is None:
+        track_id = observation.get("track_id")
+        group_id = entity_id or track_id
+        if group_id is None:
             continue
         sam = float(np.clip(float(observation.get("proposal_score", 1.0)), 0, 1))
         association = float(
@@ -481,10 +483,10 @@ def rank_vlm_candidates(
         qualities[index] = sam * association * min(
             1.0, math.sqrt(area / reference_mask_area)
         )
-        grouped.setdefault(str(entity_id), []).append(index)
+        grouped.setdefault(str(group_id), []).append(index)
 
     groups: list[dict[str, object]] = []
-    for entity_id, indices in grouped.items():
+    for group_id, indices in grouped.items():
         if len(indices) < min_observations:
             continue
         ordered = sorted(indices, key=lambda item: float(scores[item]), reverse=True)
@@ -503,13 +505,14 @@ def rank_vlm_candidates(
         first = observations[indices[0]]
         groups.append(
             {
-                "group_id": entity_id,
-                "entity_id": entity_id,
+                "candidate_id": group_id,
+                "group_id": group_id,
+                "entity_id": first.get("entity_id"),
                 "track_id": first.get("track_id"),
                 "candidate_score": score,
                 "positive_candidate_score": positive_score,
                 "map_hard_negative_score": hard_negative_score,
-                "map_hard_negatives": map_negative_diagnostics.get(entity_id, []),
+                "map_hard_negatives": map_negative_diagnostics.get(group_id, []),
                 "observation_count": len(indices),
                 "mean_observation_quality": float(np.mean(qualities[indices])),
                 "observation_indices": indices,
@@ -689,12 +692,12 @@ def prepare_vlm_query(
                 rgb,
                 mask,
                 query=query,
-                entity_id=str(candidate["entity_id"]),
+                entity_id=str(candidate["candidate_id"]),
                 frame_id=frame_id,
                 siglip_score=float(scores[observation_index]),
             )
             path = evidence_directory / (
-                f"candidate_{rank:02d}_{str(candidate['entity_id']).replace('/', '-')}_"
+                f"candidate_{rank:02d}_{str(candidate['candidate_id']).replace('/', '-')}_"
                 f"view_{view_rank:02d}_frame_{frame_id:06d}.jpg"
             )
             evidence.save(path, quality=94)
@@ -703,6 +706,19 @@ def prepare_vlm_query(
         candidate["shortlist_rank"] = rank
         candidate["evidence_images"] = evidence_paths
         candidate["evidence_frame_ids"] = frame_ids
+        best_observation = observations[
+            int(candidate["evidence_observation_indices"][0])
+        ]
+        candidate["best_revisit_view"] = {
+            "frame_id": best_observation["frame_id"],
+            "timestamp": best_observation.get("timestamp"),
+            "camera_pose_world_from_camera": best_observation.get(
+                "camera_pose_world_from_camera"
+            ),
+            "camera_origin_world": best_observation.get("camera_origin_world"),
+            "view_ray_world": best_observation.get("view_ray_world"),
+            "mask_center_rc": best_observation.get("mask_center_rc"),
+        }
     return PreparedVLMQuery(
         manifest_path=manifest_path,
         manifest=manifest,
@@ -854,7 +870,7 @@ def verify_prepared_query(
     candidate_records: list[dict[str, object]] = []
     pending_records: list[dict[str, object]] = []
     for candidate in prepared.candidates:
-        entity_id = str(candidate["entity_id"])
+        entity_id = str(candidate["candidate_id"])
         evidence_images = candidate["evidence_images"]
         frame_ids = candidate["evidence_frame_ids"]
         key = _verification_cache_key(
@@ -1002,13 +1018,22 @@ def verify_prepared_query(
         result = {
             "rank": rank,
             "entity_id": candidate["entity_id"],
+            "track_id": candidate["track_id"],
+            "candidate_id": candidate["candidate_id"],
+            "memory_type": (
+                "anchored_3d_entity"
+                if candidate["entity_id"] is not None
+                else "unanchored_2d_track"
+            ),
+            "navigation_target_available": candidate["entity_id"] is not None,
+            "best_revisit_view": candidate.get("best_revisit_view"),
             "siglip_candidate_score": candidate["candidate_score"],
             "observation_count": candidate["observation_count"],
             "vlm": asdict(verification),
             "observations": [],
         }
         entity_results.append(result)
-        entity_lookup[str(candidate["entity_id"])] = result
+        entity_lookup[str(candidate["candidate_id"])] = result
     for render_index, (candidate, observation_index) in enumerate(selected_indices):
         observation = observations[observation_index]
         frame_id = int(observation["frame_id"])
@@ -1024,19 +1049,19 @@ def verify_prepared_query(
             rgb,
             mask,
             query=prepared.query,
-            entity_id=str(candidate["entity_id"]),
+            entity_id=str(candidate["candidate_id"]),
             frame_id=frame_id,
             siglip_score=float(prepared.scores[observation_index]),
             confidence=verification.confidence,
         )
         filename = (
-            f"{render_index:04d}_{str(candidate['entity_id']).replace('/', '-')}_"
+            f"{render_index:04d}_{str(candidate['candidate_id']).replace('/', '-')}_"
             f"frame_{frame_id:06d}.jpg"
         )
         path = frames_directory / filename
         image.save(path, quality=92)
         rendered_paths.append(path)
-        entity_lookup[str(candidate["entity_id"])]["observations"].append(
+        entity_lookup[str(candidate["candidate_id"])]["observations"].append(
             {
                 "proposal_id": observation["proposal_id"],
                 "frame_id": frame_id,
@@ -1062,7 +1087,7 @@ def verify_prepared_query(
         )
         state = "accepted" if candidate["accepted"] else "rejected"
         candidate_cards.append(
-            f'<section class="{state}"><h2>{escape(str(candidate["entity_id"]))} · '
+            f'<section class="{state}"><h2>{escape(str(candidate["candidate_id"]))} · '
             f'{state} · {verification.confidence:.2f}</h2><p>'
             f'{escape(verification.reason)}</p><div>{evidence}</div></section>'
         )
@@ -1090,6 +1115,8 @@ def verify_prepared_query(
         {
             "shortlist_rank": candidate["shortlist_rank"],
             "entity_id": candidate["entity_id"],
+            "track_id": candidate["track_id"],
+            "candidate_id": candidate["candidate_id"],
             "siglip_candidate_score": candidate["candidate_score"],
             "observation_count": candidate["observation_count"],
             "vlm": asdict(candidate["verification"]),

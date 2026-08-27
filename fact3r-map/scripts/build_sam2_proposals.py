@@ -52,7 +52,9 @@ def main() -> None:
     parser.add_argument("--erosion-pixels", type=int, default=1)
     parser.add_argument("--min-component-pixels", type=int, default=50)
     parser.add_argument("--duplicate-iou-threshold", type=float, default=0.9)
-    parser.add_argument("--min-geometry-confidence", type=float, default=0.0)
+    parser.add_argument("--min-geometry-confidence", type=float, default=1.0)
+    parser.add_argument("--min-lifted-points", type=int, default=16)
+    parser.add_argument("--full-anchor-coverage", type=float, default=0.50)
     parser.add_argument("--max-keyframes", type=int)
     args = parser.parse_args()
 
@@ -86,6 +88,8 @@ def main() -> None:
         min_component_pixels=args.min_component_pixels,
         duplicate_iou_threshold=args.duplicate_iou_threshold,
         min_geometry_confidence=args.min_geometry_confidence,
+        min_lifted_points=args.min_lifted_points,
+        full_anchor_coverage=args.full_anchor_coverage,
     )
 
     summaries = []
@@ -97,13 +101,15 @@ def main() -> None:
         generated = generate_lifted_proposals(keyframe, generator, filter_config)
         summary = save_frame_proposals(output, keyframe, generated)
         summaries.append(summary)
+        lifted_count = sum(item.lifted_3d is not None for item in generated)
         print(
-            f"frame {keyframe.frame_id}: kept {len(generated)} filtered SAM2 proposals"
+            f"frame {keyframe.frame_id}: kept={len(generated)} "
+            f"3d={lifted_count} unanchored={len(generated) - lifted_count}"
         )
 
     run_manifest = {
         "format": "fact3r-sam2-proposals",
-        "version": 1,
+        "version": 2,
         "backend": args.backend,
         "model": model,
         "keyframe_export": str(args.keyframes.resolve()),
@@ -112,10 +118,21 @@ def main() -> None:
             for name in filter_config.__dataclass_fields__
         },
         "frame_count": len(summaries),
+        "proposal_count": sum(item["proposal_count"] for item in summaries),
+        "lifted_proposal_count": sum(
+            item["lifted_proposal_count"] for item in summaries
+        ),
+        "unanchored_proposal_count": sum(
+            item["unanchored_proposal_count"] for item in summaries
+        ),
         "frames": [
             {
                 "frame_id": summary["frame_id"],
                 "proposal_count": summary["proposal_count"],
+                "lifted_proposal_count": summary["lifted_proposal_count"],
+                "unanchored_proposal_count": summary[
+                    "unanchored_proposal_count"
+                ],
                 "manifest": f"frame_{summary['frame_id']:06d}/manifest.json",
             }
             for summary in summaries
@@ -125,9 +142,12 @@ def main() -> None:
     manifest_path.write_text(
         json.dumps(run_manifest, indent=2) + "\n", encoding="utf-8"
     )
+    print(
+        f"Geometry states: 3d={run_manifest['lifted_proposal_count']} "
+        f"unanchored_2d={run_manifest['unanchored_proposal_count']}"
+    )
     print(f"Wrote proposal map to {manifest_path}")
 
 
 if __name__ == "__main__":
     main()
-

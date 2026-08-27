@@ -132,6 +132,7 @@ def lift_mask_to_3d(
     min_geometry_confidence: float = -np.inf,
     min_descriptor_confidence: float | None = None,
     parent_proposal_id: str | None = None,
+    source_mask_area: int | None = None,
 ) -> LiftedProposal:
     """Lift one mask using pointmap pixels and the keyframe world transform.
 
@@ -146,9 +147,16 @@ def lift_mask_to_3d(
             f"mask must have shape {keyframe.image_shape}; got {mask_array.shape}"
         )
     mask_bool = mask_array.astype(bool, copy=False)
-    source_mask_area = int(mask_bool.sum())
-    if source_mask_area == 0:
+    selected_mask_area = int(mask_bool.sum())
+    if selected_mask_area == 0:
         raise ValueError("mask must select at least one pixel")
+    source_mask_area = (
+        selected_mask_area
+        if source_mask_area is None
+        else int(source_mask_area)
+    )
+    if source_mask_area < selected_mask_area:
+        raise ValueError("source_mask_area cannot be smaller than the lifted mask")
 
     valid = mask_bool & (
         keyframe.geometry_confidence > float(min_geometry_confidence)

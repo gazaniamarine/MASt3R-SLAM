@@ -58,9 +58,9 @@ The implemented design follows four constraints:
 
 For each finite video or HM3D sequence, the processing order is
 \begin{equation}
-\text{RGB}ightarrow\text{MASt3R-SLAM keyframes}ightarrow
-\text{SAM2 masks}ightarrow\text{SAM2 tracklets}ightarrow
-\text{SigLIP2 embeddings}ightarrow\text{UOT map}ightarrow
+\text{RGB}\rightarrow\text{MASt3R-SLAM keyframes}\rightarrow
+\text{SAM2 masks}\rightarrow\text{SAM2 tracklets}\rightarrow
+\text{SigLIP2 embeddings}\rightarrow\text{UOT map}\rightarrow
 \text{searchable observation index}.
 \end{equation}
 The SigLIP2 image embeddings are computed before UOT, then reused after UOT by
@@ -78,6 +78,27 @@ The lifted proposal geometry is
 Each proposal stores its centroid $\bm{x}_{ti}$, 3D bounding box $B_{ti}$,
 colours, optional MASt3R descriptors, original mask area $|M_{ti}|$, and the
 number of retained world points $|\mathcal{X}_{ti}|$.
+
+Crucially, the cleaned 2D mask is no longer discarded when this set is empty.
+Let
+\begin{equation}
+G_t=\{u:C_t(u)>C_{\min},\ X_t^W(u)\text{ is finite}\},\qquad
+\gamma_{ti}=\frac{|M_{ti}\cap G_t|}{|M_{ti}|}.
+\end{equation}
+Every image-valid SAM2 mask is assigned one geometry state:
+\begin{equation}
+S_{ti}=\begin{cases}
+\texttt{unanchored\_2d},&|M_{ti}\cap G_t|<16,\\
+\texttt{partial\_3d},&|M_{ti}\cap G_t|\geq16,\ \gamma_{ti}<0.50,\\
+\texttt{anchored\_3d},&|M_{ti}\cap G_t|\geq16,\ \gamma_{ti}\geq0.50.
+\end{cases}
+\label{eq:geometry-state}
+\end{equation}
+Partial and anchored proposals enter 3D association. An unanchored observation
+does not enter UOT and cannot create metric geometry, but its original mask,
+SigLIP2 embedding, SAM2 track ID, camera pose, mask centre and calibrated world
+viewing ray are retained. This separates ``the robot saw it'' from ``the robot
+already knows its depth.''
 
 For short-term continuity, SAM2 video propagation yields a track identifier and
 an adjacent-frame link IoU $q^{\mathrm{trk}}_{ti}$. This signal is only a soft
@@ -382,6 +403,33 @@ Every decision is saved with its reliability, conditional probability, retained
 ratio, track IoU, update flag, and blocking reasons. The entity artifact stores
 its appearance bank, per-view reliabilities, view count, and mean reliability.
 
+\section{Dual 2D--3D memory and later promotion}
+
+Unanchored observations are grouped by their SAM2 track ID rather than being
+turned into fictitious 3D points. A track-only memory is eligible for semantic
+retrieval only through the same multi-view support rule used for entities, so a
+single unsupported fragment is not promoted into a confident result.
+
+If later observations of the same track obtain valid 3D support, they enter the
+normal delayed-birth and UOT pipeline. Once that track is committed to entity
+$E_j$, all earlier observations with the same track ID are retrospectively
+attached to $E_j$ without re-encoding their images. Thus promotion is
+\begin{equation}
+\texttt{unanchored\_2d track}
+\longrightarrow \texttt{partial\_3d evidence}
+\longrightarrow \texttt{anchored\_3d entity},
+\end{equation}
+but only observed geometry is written to the metric map.
+
+If no later depth is recovered, the result remains explicitly non-metric. It
+stores a best revisit camera pose $T^*_{WC}$ and, with calibration, a world ray
+\begin{equation}
+\bm d^W=\frac{R_{WC}K^{-1}[c,r,1]^\top}
+{\|R_{WC}K^{-1}[c,r,1]^\top\|_2},
+\end{equation}
+where $(r,c)$ is the mask centre. The system can return to the observation
+viewpoint, but it must not claim that the object itself has a known 3D location.
+
 \section{Open-vocabulary retrieval without manual confounders}
 
 After mapping, the pre-UOT embedding matrix is reused unchanged and the final
@@ -453,6 +501,7 @@ large model for ambiguity.
 Subsystem & Parameter & Value\\
 \midrule
 Spatial support & centroid radius / box padding & 1.0 m / 0.05 m\\
+Dual memory & confidence / minimum points / full coverage & 1.0 / 16 / 0.50\\
 Geometry & point-match radius / samples & 0.08 m / 256\\
 Appearance cost & weight / temperature & 0.25 / 0.07\\
 Appearance bank & maximum views / redundancy cosine & 8 / 0.95\\
@@ -469,11 +518,14 @@ VLM acceptance & confidence / supporting views & .75 / 2\\
 
 \section{What changed and why}
 
-The implementation makes six concrete changes to the earlier geometry-only
+The implementation makes seven concrete changes to the earlier geometry-only
 delayed-UOT mapper:
 \begin{enumerate}[leftmargin=*]
     \item \textbf{Pre-UOT SigLIP2 encoding.} Appearance is available during
           association and the expensive image pass is reused for retrieval.
+    \item \textbf{Geometry-optional observation memory.} SAM2 masks remain
+          searchable as tracked 2D evidence when MASt3R supplies no safe depth;
+          later track commitment backfills their entity identity.
     \item \textbf{Reliability-scaled appearance cost.} Appearance resolves
           nearby repeated geometry, but weak masks contribute little and cannot
           create non-spatial matches.
@@ -501,6 +553,7 @@ conda run -n SAM2 python3 \
   fact3r-map/scripts/build_siglip_observation_index.py \
   --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/00800-TEEsavR23oF \
   --proposals logs/hm3d/calib_fact3r/fact3r_sam2/00800-TEEsavR23oF \
+  --tracklets logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/00800-TEEsavR23oF \
   --output logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/00800-TEEsavR23oF \
   --device 0
 
@@ -561,15 +614,17 @@ split, never on the final evaluation scenes.
 
 \section{Limitations}
 
-The current method assumes a mostly static scene and sufficiently aligned
-MASt3R-SLAM geometry. SigLIP2 is not trained specifically for tiny masked indoor
+The current method assumes a mostly static scene. SigLIP2 is not trained
+specifically for tiny masked indoor
 parts, so very small or visually featureless objects may remain ambiguous.
-Map-derived negatives require at least two confirmed entities and can suppress a
+Map-derived negatives require at least two persistent groups and can suppress a
 true result when two physical instances are nearly identical; the final
 multi-view verifier is intended to handle that case. Appearance does not repair
 a wrong 3D spatial gate, and Qwen3-VL adds substantial model-load latency on an
 uncached query. These are measurable limitations rather than hidden failure
 modes because the pipeline saves transport, reliability, update, and verification
-diagnostics for audit.
+diagnostics for audit. A 2D-only memory supplies a revisit viewpoint, not an
+object-space navigation coordinate; triangulation from multiple viewing rays is
+not yet used to create metric geometry.
 
 \end{document}

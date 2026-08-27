@@ -35,6 +35,10 @@ def main() -> None:
         f"{manifest['observation_count']} observations to persistent entities "
         "without re-encoding images"
     )
+    print(
+        f"Retained {manifest.get('track_only_observation_count', 0)} "
+        "observations as searchable 2D-only tracks"
+    )
     print(f"Wrote mapped SigLIP observation index to {manifest_path}")
 
 

@@ -228,6 +228,9 @@ def main() -> None:
         raise ValueError("--delayed-commitment requires --tracklets")
 
     proposal_run = load_proposal_run_manifest(args.proposals)
+    proposal_frame_summaries = {
+        int(entry["frame_id"]): entry for entry in proposal_run["frames"]
+    }
     if proposal_run.get("backend") != "official":
         raise ValueError("residual transport expects official-SAM2 proposals")
     pairwise_config = PairwiseCostConfig(
@@ -364,8 +367,16 @@ def main() -> None:
             if tracklet_run is None
             else tracklet_run.observations_by_frame.get(frame.frame_id, ())
         )
-        observations_by_proposal = {
+        all_observations_by_proposal = {
             observation.proposal_id: observation for observation in observations
+        }
+        lifted_proposal_ids = {
+            proposal.proposal_id for proposal in frame.proposals
+        }
+        observations_by_proposal = {
+            proposal_id: observation
+            for proposal_id, observation in all_observations_by_proposal.items()
+            if proposal_id in lifted_proposal_ids
         }
         appearance_evidence = {}
         if appearance_index is not None:
@@ -552,6 +563,14 @@ def main() -> None:
                 "frame_id": result.frame_id,
                 "timestamp": result.timestamp,
                 "proposal_count": result.proposal_count,
+                "source_2d_proposal_count": int(
+                    proposal_frame_summaries[result.frame_id]["proposal_count"]
+                ),
+                "unanchored_2d_count": int(
+                    proposal_frame_summaries[result.frame_id].get(
+                        "unanchored_proposal_count", 0
+                    )
+                ),
                 "entity_count_before": result.entity_count_before,
                 "entity_count_after": result.entity_count_after,
                 "transport_evidence": evidence_file,
@@ -666,6 +685,16 @@ def main() -> None:
         ),
         "frame_count": len(frame_entries),
         "entity_count": len(entity_entries),
+        "source_2d_proposal_total": sum(
+            int(entry["source_2d_proposal_count"])
+            for entry in frame_entries
+        ),
+        "mapped_3d_proposal_total": sum(
+            int(entry["proposal_count"]) for entry in frame_entries
+        ),
+        "unanchored_2d_observation_total": sum(
+            int(entry["unanchored_2d_count"]) for entry in frame_entries
+        ),
         "matched_total": matched_total,
         "created_total": created_total,
         "unmatched_reason_totals": unmatched_totals,

@@ -32,6 +32,11 @@ def main() -> None:
     parser.add_argument("--keyframes", type=Path, required=True)
     parser.add_argument("--proposals", type=Path, required=True)
     parser.add_argument(
+        "--tracklets",
+        type=Path,
+        help="optional SAM2 tracklets used to retain 2D-only observation identity",
+    )
+    parser.add_argument(
         "--mapping",
         type=Path,
         help="optional Hungarian/Sinkhorn/UOT map used to attach persistent IDs",
@@ -55,6 +60,7 @@ def main() -> None:
         keyframes=args.keyframes,
         proposals=args.proposals,
         mapping=args.mapping,
+        tracklets=args.tracklets,
         output=output,
         encoder=encoder,
         batch_size=args.batch_size,

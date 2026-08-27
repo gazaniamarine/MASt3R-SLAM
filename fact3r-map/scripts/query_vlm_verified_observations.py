@@ -140,8 +140,9 @@ def main() -> None:
     result = json.loads(result_path.read_text(encoding="utf-8"))
     if result["confident_match_found"]:
         for entity in result["entities"]:
+            candidate_id = entity.get("entity_id") or entity.get("track_id")
             print(
-                f"accepted {entity['entity_id']}: "
+                f"accepted {candidate_id}: "
                 f"Qwen confidence={entity['vlm']['confidence']:.2f}, "
                 f"frames={len(entity['observations'])}"
             )

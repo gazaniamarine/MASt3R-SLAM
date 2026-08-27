@@ -15,6 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw
 
+from fact3r.association.tracklets import load_tracklet_run
 from fact3r.integrations.mast3r_slam import iter_exported_keyframes
 from fact3r.proposals.storage import load_proposal_run_manifest
 from fact3r.visualization.association import mask_boundary
@@ -323,6 +324,7 @@ def build_observation_index(
     output: str | Path,
     encoder: VisionLanguageEncoder,
     mapping: str | Path | None = None,
+    tracklets: str | Path | None = None,
     batch_size: int = 32,
     context_fraction: float = 0.15,
     outside_mask_alpha: float = 0.20,
@@ -341,6 +343,13 @@ def build_observation_index(
         int(entry["frame_id"]): entry for entry in proposal_run["frames"]
     }
     assignments = load_mapping_assignments(mapping)
+    tracklet_run = None if tracklets is None else load_tracklet_run(tracklets)
+    if (
+        tracklet_run is not None
+        and Path(tracklet_run.source_proposals).resolve()
+        != proposal_directory.resolve()
+    ):
+        raise ValueError("tracklets and observation index use different proposals")
 
     observations: list[dict[str, object]] = []
     image_batch: list[Image.Image] = []
@@ -356,6 +365,14 @@ def build_observation_index(
         frame_manifest = json.loads(
             frame_manifest_path.read_text(encoding="utf-8")
         )
+        frame_tracklets = {
+            item.proposal_id: item
+            for item in (
+                ()
+                if tracklet_run is None
+                else tracklet_run.observations_by_frame.get(keyframe.frame_id, ())
+            )
+        }
         for proposal in frame_manifest["proposals"]:
             proposal_id = str(proposal["proposal_id"])
             proposal_file = frame_manifest_path.parent / str(proposal["file"])
@@ -371,12 +388,55 @@ def build_observation_index(
                 (keyframe.frame_id, proposal_id),
                 MappingAssignment(None, None, "unassigned"),
             )
+            tracklet = frame_tracklets.get(proposal_id)
+            track_id = assignment.track_id or (
+                None if tracklet is None else tracklet.track_id
+            )
+            geometry_status = str(
+                proposal.get("geometry_status", "anchored_3d")
+            )
+            assignment_status = assignment.status
+            association_confidence = assignment.association_confidence
+            if assignment.entity_id is None and geometry_status == "unanchored_2d":
+                assignment_status = "unanchored_2d"
+                association_confidence = (
+                    0.5
+                    if tracklet is None or tracklet.link_iou is None
+                    else float(tracklet.link_iou)
+                )
             observation_index = len(observations)
             group_id = (
                 assignment.entity_id
-                or assignment.track_id
+                or track_id
                 or f"observation-{observation_index:06d}"
             )
+            mask_rows, mask_columns = np.nonzero(mask)
+            mask_center_rc = [
+                float(np.mean(mask_rows)),
+                float(np.mean(mask_columns)),
+            ]
+            camera_origin = np.asarray(
+                keyframe.pose_world_from_camera[:3, 3], dtype=np.float64
+            )
+            view_ray_world = None
+            if keyframe.intrinsics is not None:
+                pixel = np.asarray(
+                    [mask_center_rc[1], mask_center_rc[0], 1.0],
+                    dtype=np.float64,
+                )
+                ray_camera = np.linalg.solve(
+                    np.asarray(keyframe.intrinsics, dtype=np.float64), pixel
+                )
+                ray_world = (
+                    np.asarray(
+                        keyframe.pose_world_from_camera[:3, :3],
+                        dtype=np.float64,
+                    )
+                    @ ray_camera
+                )
+                ray_norm = float(np.linalg.norm(ray_world))
+                if np.isfinite(ray_norm) and ray_norm > 1e-12:
+                    view_ray_world = (ray_world / ray_norm).tolist()
             observations.append(
                 {
                     "index": observation_index,
@@ -384,13 +444,29 @@ def build_observation_index(
                     "frame_id": keyframe.frame_id,
                     "timestamp": keyframe.timestamp,
                     "entity_id": assignment.entity_id,
-                    "track_id": assignment.track_id,
+                    "track_id": track_id,
                     "group_id": group_id,
-                    "assignment_status": assignment.status,
-                    "association_confidence": assignment.association_confidence,
+                    "assignment_status": assignment_status,
+                    "association_confidence": association_confidence,
                     "proposal_score": float(proposal["score"]),
                     "mask_area": int(proposal["mask_area"]),
+                    "geometry_status": geometry_status,
+                    "geometry_coverage": float(
+                        proposal.get("geometry_coverage", 1.0)
+                    ),
+                    "lifted_point_count": int(
+                        proposal.get("lifted_point_count", proposal["mask_area"])
+                    ),
                     "bounding_box_xyxy": proposal.get("bounding_box_xyxy"),
+                    "mask_center_rc": mask_center_rc,
+                    "camera_pose_world_from_camera": np.asarray(
+                        keyframe.pose_world_from_camera
+                    ).tolist(),
+                    "camera_origin_world": camera_origin.tolist(),
+                    "view_ray_world": view_ray_world,
+                    "track_link_iou": (
+                        None if tracklet is None else tracklet.link_iou
+                    ),
                     "mask_file": str(proposal_file.relative_to(proposal_directory)),
                 }
             )
@@ -418,6 +494,9 @@ def build_observation_index(
         "device": encoder.device_name,
         "source_keyframes": str(keyframe_directory.resolve()),
         "source_proposals": str(proposal_directory.resolve()),
+        "source_tracklets": (
+            None if tracklets is None else str(_manifest_path(tracklets).resolve())
+        ),
         "source_mapping": (
             None if mapping is None else str(_manifest_path(mapping).resolve())
         ),
@@ -428,6 +507,15 @@ def build_observation_index(
         "observation_count": len(observations),
         "assigned_observation_count": sum(
             observation["entity_id"] is not None for observation in observations
+        ),
+        "unanchored_observation_count": sum(
+            observation.get("geometry_status") == "unanchored_2d"
+            for observation in observations
+        ),
+        "track_only_observation_count": sum(
+            observation["entity_id"] is None
+            and observation.get("track_id") is not None
+            for observation in observations
         ),
         "crop_config": {
             "context_fraction": context_fraction,
@@ -496,23 +584,45 @@ def attach_mapping_to_observation_index(
         and Path(str(mapped_proposals)).resolve() != indexed_proposals
     ):
         raise ValueError("index and mapping were built from different proposals")
+    committed_tracks = {
+        str(track_id): str(entity_id)
+        for track_id, entity_id in mapping_manifest.get(
+            "committed_track_entities", {}
+        ).items()
+    }
     assignments = load_mapping_assignments(mapping)
     observations: list[dict[str, object]] = []
     for source in source_manifest["observations"]:
         observation = dict(source)
         key = (int(observation["frame_id"]), str(observation["proposal_id"]))
-        assignment = assignments.get(
-            key, MappingAssignment(None, None, "unassigned")
+        assignment = assignments.get(key)
+        source_track_id = observation.get("track_id")
+        track_id = (
+            assignment.track_id
+            if assignment is not None and assignment.track_id is not None
+            else (
+                None if source_track_id is None else str(source_track_id)
+            )
         )
-        observation["entity_id"] = assignment.entity_id
-        observation["track_id"] = assignment.track_id
-        observation["assignment_status"] = assignment.status
-        observation["association_confidence"] = (
-            assignment.association_confidence
-        )
+        entity_id = None if assignment is None else assignment.entity_id
+        if entity_id is None and track_id is not None:
+            entity_id = committed_tracks.get(track_id)
+        if assignment is not None:
+            status = assignment.status
+            confidence = assignment.association_confidence
+        elif entity_id is not None:
+            status = "retrospectively_anchored"
+            confidence = float(observation.get("association_confidence", 0.5))
+        else:
+            status = str(observation.get("assignment_status", "unassigned"))
+            confidence = float(observation.get("association_confidence", 0.5))
+        observation["entity_id"] = entity_id
+        observation["track_id"] = track_id
+        observation["assignment_status"] = status
+        observation["association_confidence"] = confidence
         observation["group_id"] = (
-            assignment.entity_id
-            or assignment.track_id
+            entity_id
+            or track_id
             or f"observation-{int(observation['index']):06d}"
         )
         observations.append(observation)
@@ -527,6 +637,15 @@ def attach_mapping_to_observation_index(
             "embedding_file": "embeddings.npy",
             "assigned_observation_count": sum(
                 observation["entity_id"] is not None
+                for observation in observations
+            ),
+            "unanchored_observation_count": sum(
+                observation.get("geometry_status") == "unanchored_2d"
+                for observation in observations
+            ),
+            "track_only_observation_count": sum(
+                observation["entity_id"] is None
+                and observation.get("track_id") is not None
                 for observation in observations
             ),
             "reused_embedding_source": str(source_path.resolve()),
@@ -606,6 +725,24 @@ def default_negative_prompts() -> tuple[str, ...]:
     )
 
 
+def _retrievable_group_id(
+    observation: Mapping[str, object],
+    *,
+    confirmed_only: bool,
+    include_unanchored_tracks: bool,
+) -> str | None:
+    entity_id = observation.get("entity_id")
+    if entity_id is not None:
+        return str(entity_id)
+    track_id = observation.get("track_id")
+    if include_unanchored_tracks and track_id is not None:
+        return str(track_id)
+    if confirmed_only:
+        return None
+    group_id = track_id or observation.get("group_id")
+    return None if group_id is None else str(group_id)
+
+
 def map_derived_hard_negative_scores(
     embeddings: FloatArray,
     observations: Sequence[Mapping[str, object]],
@@ -613,6 +750,7 @@ def map_derived_hard_negative_scores(
     *,
     neighbors: int = 3,
     confirmed_only: bool = True,
+    include_unanchored_tracks: bool = True,
 ) -> tuple[NDArray[np.float32], dict[str, list[dict[str, object]]]]:
     """Use visually nearest competing map entities as query-time negatives."""
 
@@ -625,11 +763,14 @@ def map_derived_hard_negative_scores(
     query = _normalise_rows(np.mean(queries, axis=0, keepdims=True))[0]
     grouped: dict[str, list[int]] = defaultdict(list)
     for index, observation in enumerate(observations):
-        entity_id = observation.get("entity_id")
-        if confirmed_only and entity_id is None:
+        group_id = _retrievable_group_id(
+            observation,
+            confirmed_only=confirmed_only,
+            include_unanchored_tracks=include_unanchored_tracks,
+        )
+        if group_id is None:
             continue
-        group_id = entity_id or observation.get("track_id") or observation["group_id"]
-        grouped[str(group_id)].append(index)
+        grouped[group_id].append(index)
     scores = np.full(len(observations), -1.0, dtype=np.float32)
     diagnostics: dict[str, list[dict[str, object]]] = {
         group_id: [] for group_id in grouped
@@ -680,6 +821,7 @@ def rank_semantic_entity_groups(
     min_entity_margin: float = 0.02,
     reference_mask_area: float = 4096.0,
     confirmed_only: bool = True,
+    include_unanchored_tracks: bool = True,
     automatic_map_negatives: bool = True,
     map_negative_neighbors: int = 3,
     map_negative_weight: float = 1.0,
@@ -726,6 +868,7 @@ def rank_semantic_entity_groups(
                 positives,
                 neighbors=map_negative_neighbors,
                 confirmed_only=confirmed_only,
+                include_unanchored_tracks=include_unanchored_tracks,
             )
         )
     negative_scores = np.maximum(
@@ -736,8 +879,12 @@ def rank_semantic_entity_groups(
     qualities = np.empty(len(observations), dtype=np.float32)
     grouped: dict[str, list[int]] = defaultdict(list)
     for index, observation in enumerate(observations):
-        entity_id = observation.get("entity_id")
-        if confirmed_only and entity_id is None:
+        group_id = _retrievable_group_id(
+            observation,
+            confirmed_only=confirmed_only,
+            include_unanchored_tracks=include_unanchored_tracks,
+        )
+        if group_id is None:
             qualities[index] = 0.0
             continue
         sam_confidence = float(
@@ -753,8 +900,7 @@ def rank_semantic_entity_groups(
         mask_area = max(0.0, float(observation.get("mask_area", 0.0)))
         area_quality = min(1.0, np.sqrt(mask_area / reference_mask_area))
         qualities[index] = sam_confidence * association_confidence * area_quality
-        group_id = entity_id or observation.get("track_id") or observation["group_id"]
-        grouped[str(group_id)].append(index)
+        grouped[group_id].append(index)
 
     groups: list[dict[str, object]] = []
     for group_id, indices in grouped.items():
@@ -950,6 +1096,7 @@ def query_observation_index(
     positive_prompts: Sequence[str] | None = None,
     negative_prompts: Sequence[str] | None = None,
     confirmed_only: bool = True,
+    include_unanchored_tracks: bool = True,
     min_supporting_views: int = 2,
     min_view_margin: float = 0.02,
     min_entity_margin: float = 0.02,
@@ -1019,6 +1166,7 @@ def query_observation_index(
             min_entity_margin=min_entity_margin,
             reference_mask_area=reference_mask_area,
             confirmed_only=confirmed_only,
+            include_unanchored_tracks=include_unanchored_tracks,
             automatic_map_negatives=automatic_map_negatives,
             map_negative_neighbors=map_negative_neighbors,
             map_negative_weight=map_negative_weight,
@@ -1034,6 +1182,9 @@ def query_observation_index(
     result_groups: list[dict[str, object]] = []
     result_group_lookup: dict[str, dict[str, object]] = {}
     for rank, group in enumerate(selected_groups, start=1):
+        best_observation = observations[
+            int(group["ranked_observation_indices"][0])
+        ]
         result_group = {
             "rank": rank,
             "group_id": group["group_id"],
@@ -1045,6 +1196,24 @@ def query_observation_index(
             "mean_observation_quality": group["mean_observation_quality"],
             "map_hard_negative_score": group["map_hard_negative_score"],
             "map_hard_negatives": group["map_hard_negatives"],
+            "memory_type": (
+                "anchored_3d_entity"
+                if group["entity_id"] is not None
+                else "unanchored_2d_track"
+            ),
+            "navigation_target_available": group["entity_id"] is not None,
+            "best_revisit_view": {
+                "frame_id": best_observation["frame_id"],
+                "timestamp": best_observation.get("timestamp"),
+                "camera_pose_world_from_camera": best_observation.get(
+                    "camera_pose_world_from_camera"
+                ),
+                "camera_origin_world": best_observation.get(
+                    "camera_origin_world"
+                ),
+                "view_ray_world": best_observation.get("view_ray_world"),
+                "mask_center_rc": best_observation.get("mask_center_rc"),
+            },
             "observations": [],
         }
         result_groups.append(result_group)
@@ -1111,6 +1280,14 @@ def query_observation_index(
                 ),
                 "semantic_margin": float(margins[observation_index]),
                 "observation_quality": float(qualities[observation_index]),
+                "geometry_status": observation.get(
+                    "geometry_status", "anchored_3d"
+                ),
+                "geometry_coverage": observation.get("geometry_coverage", 1.0),
+                "camera_pose_world_from_camera": observation.get(
+                    "camera_pose_world_from_camera"
+                ),
+                "view_ray_world": observation.get("view_ray_world"),
                 "supports_query": bool(
                     margins[observation_index] >= min_view_margin
                 ),
@@ -1167,6 +1344,7 @@ def query_observation_index(
         "confounder_prompts": list(negative_prompts),
         "ranking_config": {
             "confirmed_only": confirmed_only,
+            "include_unanchored_tracks": include_unanchored_tracks,
             "entity_top_views": top_views,
             "min_supporting_views": min_supporting_views,
             "min_view_margin": min_view_margin,

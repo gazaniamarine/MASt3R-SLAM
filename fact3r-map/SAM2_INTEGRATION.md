@@ -185,15 +185,21 @@ existing proposals and tracklets does not require MASt3R-SLAM or SAM2 inference.
 
 ## Filtering performed before lifting
 
-The pipeline currently applies:
+The pipeline currently applies image-space cleanup without requiring immediate
+3D support:
 
 1. SAM2 predicted-IoU and stability thresholds;
 2. minimum and maximum mask area;
-3. MASt3R geometry-confidence intersection;
-4. boundary erosion;
-5. small connected-component removal;
-6. mask-IoU duplicate suppression;
-7. mask lifting through the finalized world-from-camera transform.
+3. boundary erosion;
+4. small connected-component removal;
+5. mask-IoU duplicate suppression.
+
+It then measures, rather than destructively applies, the MASt3R
+geometry-confidence intersection. Masks with at least 16 supported pixels are
+lifted through the finalized world-from-camera transform; coverage at least
+`0.50` is `anchored_3d`, lower nonzero coverage is `partial_3d`, and insufficient
+support is `unanchored_2d`. The last category remains available to SAM2
+tracklets and semantic memory but is excluded from metric UOT.
 
 Useful controls include:
 
@@ -205,7 +211,9 @@ Useful controls include:
 --erosion-pixels 1
 --min-component-pixels 50
 --duplicate-iou-threshold 0.9
---min-geometry-confidence 0.0
+--min-geometry-confidence 1.0
+--min-lifted-points 16
+--full-anchor-coverage 0.50
 ```
 
 Reduce `--points-per-batch` if automatic mask generation runs out of GPU memory. Increase the confidence and minimum-area thresholds if SAM2 produces too many fragments.
@@ -309,6 +317,7 @@ conda run -n SAM2 python3 \
   fact3r-map/scripts/build_siglip_observation_index.py \
   --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
   --proposals logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --tracklets logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/SCENE_NAME \
   --output logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/SCENE_NAME \
   --device 0
 ```

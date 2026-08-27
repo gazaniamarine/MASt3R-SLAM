@@ -69,6 +69,11 @@ def main() -> None:
         action="store_true",
         help="also rank pending/unassigned groups; disabled for navigation by default",
     )
+    parser.add_argument(
+        "--no-unanchored-tracks",
+        action="store_true",
+        help="exclude persistent 2D tracks that never acquired reliable 3D support",
+    )
     parser.add_argument("--max-observations-per-entity", type=int)
     parser.add_argument("--gif-width", type=int, default=1000)
     parser.add_argument("--gif-duration-ms", type=int, default=400)
@@ -88,6 +93,7 @@ def main() -> None:
         positive_prompts=args.positive_prompt,
         negative_prompts=args.confounder,
         confirmed_only=not args.include_unconfirmed,
+        include_unanchored_tracks=not args.no_unanchored_tracks,
         min_supporting_views=args.min_supporting_views,
         min_view_margin=args.min_view_margin,
         min_entity_margin=args.min_entity_margin,
@@ -110,7 +116,10 @@ def main() -> None:
                 f"frames={len(entity['observations'])}"
             )
     else:
-        print("No confirmed entity passed the semantic confidence gates.")
+        print(
+            "No persistent 3D entity or tracked 2D observation passed the "
+            "semantic confidence gates."
+        )
     print(
         f"Query took {result['timing']['total_query_seconds_excluding_model_load']:.2f}s "
         f"after model loading"

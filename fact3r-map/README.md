@@ -194,6 +194,22 @@ confounders for every query. The fast path still requires support from multiple
 views, while Qwen3-VL remains an optional final verifier for ambiguous small
 objects.
 
+SAM2 observations are now retained independently of immediate MASt3R depth.
+After image-space cleanup, every mask is classified as `anchored_3d`,
+`partial_3d`, or `unanchored_2d` from the fraction of mask pixels with finite,
+confident pointmap support. The first two enter 3D association. A 2D-only mask
+does not create invented geometry, but its original mask, SigLIP2 embedding,
+SAM2 track, camera pose and calibrated viewing ray remain searchable. If that
+track later becomes a committed 3D entity, its earlier 2D observations are
+attached retrospectively without re-encoding them.
+
+Fast and VLM queries include multi-view 2D-only tracks by default. Their result
+has `memory_type: unanchored_2d_track`,
+`navigation_target_available: false`, and a `best_revisit_view`. This means the
+robot can return to where it saw the object, while the system does not pretend to
+know the object’s metric coordinate. Use `--no-unanchored-tracks` on the fast
+query script when only 3D navigation targets should be returned.
+
 The complete notation, objective, generalized Sinkhorn updates, memory rules,
 query equations, defaults, rationale and ablation plan are in
 [`FACT3R_METHODS.tex`](FACT3R_METHODS.tex).
@@ -201,11 +217,26 @@ query equations, defaults, rationale and ablation plan are in
 For an already exported HM3D scene, run the new stages explicitly:
 
 ```bash
+# Rebuild proposals once if their manifest is version 1. Version 2 preserves
+# SAM masks even when MASt3R has no usable points.
+conda run -n SAM2 python3 fact3r-map/scripts/build_sam2_proposals.py \
+  --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --output logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --backend official --device 0
+
+# Rebuild tracklets after changing the proposal artifact.
+conda run -n SAM2 python3 fact3r-map/scripts/build_sam2_tracklets.py \
+  --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --proposals logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --output logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/SCENE_NAME \
+  --device 0
+
 # Encode every mask once, before association.
 conda run -n SAM2 python3 \
   fact3r-map/scripts/build_siglip_observation_index.py \
   --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
   --proposals logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --tracklets logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/SCENE_NAME \
   --output logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/SCENE_NAME \
   --device 0
 

@@ -44,7 +44,9 @@ def main() -> None:
     print(
         f"Finalized map with {payload['frame_count']} keyframes, "
         f"{payload['entity_count']} entities and "
-        f"{payload['observation_count']} indexed observations at {path}"
+        f"{payload['observation_count']} indexed observations "
+        f"({payload['track_only_observation_count']} retained as 2D tracks) "
+        f"at {path}"
     )
 
 

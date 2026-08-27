@@ -10,7 +10,7 @@ from typing import Iterable, Iterator
 import numpy as np
 
 from fact3r.proposals.lift_to_3d import LiftedProposal
-from fact3r.proposals.proposal_pipeline import GeneratedProposal
+from fact3r.proposals.proposal_pipeline import GeneratedProposal, GeometryStatus
 from fact3r.reconstruction.keyframes import KeyframeRecord
 from fact3r.visualization.alignment import write_alignment_ply
 
@@ -38,21 +38,26 @@ def save_frame_proposals(
         filename = f"proposal_{index:04d}.npz"
         payload: dict[str, np.ndarray] = {
             "mask": mask.mask,
-            "pixel_rc": lifted.pixel_rc,
-            "points_world": lifted.points_world,
-            "colours_rgb": lifted.colours_rgb,
-            "geometry_confidence": lifted.geometry_confidence,
         }
-        if lifted.mast3r_descriptors is not None:
-            payload["mast3r_descriptors"] = lifted.mast3r_descriptors
-        if lifted.descriptor_confidence is not None:
-            payload["descriptor_confidence"] = lifted.descriptor_confidence
-        if lifted.appearance_descriptor is not None:
-            payload["appearance_descriptor"] = lifted.appearance_descriptor
-        if lifted.appearance_reliability is not None:
-            payload["appearance_reliability"] = np.asarray(
-                lifted.appearance_reliability, dtype=np.float32
+        if lifted is not None:
+            payload.update(
+                {
+                    "pixel_rc": lifted.pixel_rc,
+                    "points_world": lifted.points_world,
+                    "colours_rgb": lifted.colours_rgb,
+                    "geometry_confidence": lifted.geometry_confidence,
+                }
             )
+            if lifted.mast3r_descriptors is not None:
+                payload["mast3r_descriptors"] = lifted.mast3r_descriptors
+            if lifted.descriptor_confidence is not None:
+                payload["descriptor_confidence"] = lifted.descriptor_confidence
+            if lifted.appearance_descriptor is not None:
+                payload["appearance_descriptor"] = lifted.appearance_descriptor
+            if lifted.appearance_reliability is not None:
+                payload["appearance_reliability"] = np.asarray(
+                    lifted.appearance_reliability, dtype=np.float32
+                )
         np.savez_compressed(frame_directory / filename, **payload)
         entries.append(
             {
@@ -61,9 +66,17 @@ def save_frame_proposals(
                 "source": mask.source,
                 "score": mask.score,
                 "mask_area": mask.area,
-                "lifted_point_count": len(lifted.points_world),
-                "centroid_xyz": lifted.centroid_xyz.tolist(),
-                "bounding_box_xyz": lifted.bounding_box_xyz.tolist(),
+                "geometry_status": generated.geometry_status.value,
+                "geometry_coverage": generated.geometry_coverage,
+                "lifted_point_count": (
+                    0 if lifted is None else len(lifted.points_world)
+                ),
+                "centroid_xyz": (
+                    None if lifted is None else lifted.centroid_xyz.tolist()
+                ),
+                "bounding_box_xyz": (
+                    None if lifted is None else lifted.bounding_box_xyz.tolist()
+                ),
                 "bounding_box_xyxy": (
                     None
                     if mask.bounding_box_xyxy is None
@@ -76,13 +89,20 @@ def save_frame_proposals(
     write_alignment_ply(
         visualization,
         [keyframe],
-        [proposal.lifted_3d for proposal in proposals],
+        [
+            proposal.lifted_3d
+            for proposal in proposals
+            if proposal.lifted_3d is not None
+        ],
     )
+    lifted_count = sum(proposal.lifted_3d is not None for proposal in proposals)
     manifest = {
         "frame_id": keyframe.frame_id,
         "timestamp": keyframe.timestamp,
         "image_shape": list(keyframe.image_shape),
         "proposal_count": len(proposals),
+        "lifted_proposal_count": lifted_count,
+        "unanchored_proposal_count": len(proposals) - lifted_count,
         "visualization": visualization.name,
         "proposals": entries,
     }
@@ -102,7 +122,7 @@ def load_proposal_run_manifest(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("format") != "fact3r-sam2-proposals":
         raise ValueError(f"unsupported proposal run in {manifest_path}")
-    if manifest.get("version") != 1:
+    if manifest.get("version") not in {1, 2}:
         raise ValueError(
             f"unsupported proposal-run version {manifest.get('version')}"
         )
@@ -127,6 +147,12 @@ def iter_saved_proposal_frames(
             with np.load(
                 frame_manifest_path.parent / entry["file"], allow_pickle=False
             ) as payload:
+                if (
+                    entry.get("geometry_status")
+                    == GeometryStatus.UNANCHORED_2D.value
+                    or "points_world" not in payload.files
+                ):
+                    continue
                 descriptors = (
                     np.array(payload["mast3r_descriptors"], copy=True)
                     if "mast3r_descriptors" in payload.files
@@ -165,7 +191,11 @@ def iter_saved_proposal_frames(
                         appearance_reliability=appearance_reliability,
                     )
                 )
-        expected_count = int(frame_manifest["proposal_count"])
+        expected_count = int(
+            frame_manifest.get(
+                "lifted_proposal_count", frame_manifest["proposal_count"]
+            )
+        )
         if len(proposals) != expected_count:
             raise ValueError(
                 f"frame {frame_id} declares {expected_count} proposals but "

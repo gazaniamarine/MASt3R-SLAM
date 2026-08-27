@@ -151,6 +151,16 @@ def create_video_map_manifest(
         "observation_count": int(
             stages["observations"][1].get("observation_count", 0)
         ),
+        "unanchored_observation_count": int(
+            stages["observations"][1].get(
+                "unanchored_observation_count", 0
+            )
+        ),
+        "track_only_observation_count": int(
+            stages["observations"][1].get(
+                "track_only_observation_count", 0
+            )
+        ),
         "artifacts": {
             name: {
                 "directory": _relative(directory, root),

@@ -74,10 +74,11 @@ def main() -> None:
     for entry in run["frames"]:
         manifest = json.loads((args.proposals / entry["manifest"]).read_text())
         directory = args.proposals / f"frame_{manifest['frame_id']:06d}"
-        points = [
-            np.load(directory / p["file"])["points_world"]
-            for p in manifest["proposals"]
-        ]
+        points = []
+        for proposal in manifest["proposals"]:
+            with np.load(directory / proposal["file"], allow_pickle=False) as data:
+                if "points_world" in data.files:
+                    points.append(np.array(data["points_world"], copy=True))
         frames.append((manifest["frame_id"], points))
 
     # --- 1. lift arithmetic ---
@@ -90,6 +91,8 @@ def main() -> None:
         directory = args.proposals / f"frame_{frame_id:06d}"
         for entry in manifest["proposals"][:5]:
             stored = np.load(directory / entry["file"])
+            if "points_world" not in stored.files:
+                continue
             rc = stored["pixel_rc"]
             recomputed = _world(
                 data["pointmap_camera"][rc[:, 0], rc[:, 1]],
