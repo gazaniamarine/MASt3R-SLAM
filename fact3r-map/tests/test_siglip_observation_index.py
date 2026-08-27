@@ -21,6 +21,7 @@ from fact3r.semantics.vlm_verification import (
     local_image_source,
     parse_listwise_verification_output,
     parse_verification_output,
+    pathological_border_sliver,
     prepare_vlm_query,
     rank_vlm_candidates,
     verify_prepared_query,
@@ -243,6 +244,14 @@ def _write_mapping(directory: Path) -> None:
 
 
 class SiglipObservationIndexTests(unittest.TestCase):
+    def test_pathological_border_sliver_rejects_edge_strip_only(self) -> None:
+        strip = np.zeros((480, 640), dtype=bool)
+        strip[:, 625:639] = True
+        chair_like = np.zeros((480, 640), dtype=bool)
+        chair_like[180:470, 20:210] = True
+        self.assertTrue(pathological_border_sliver(strip))
+        self.assertFalse(pathological_border_sliver(chair_like))
+
     def test_qwen_local_image_source_is_plain_absolute_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "evidence image.jpg"
@@ -452,6 +461,7 @@ class SiglipObservationIndexTests(unittest.TestCase):
                 output=output,
                 encoder=encoder,
                 max_candidates=2,
+                min_siglip_score=-1.0,
             )
             verifier = _EntityVerifier()
             result_path = verify_prepared_query(prepared, verifier=verifier)

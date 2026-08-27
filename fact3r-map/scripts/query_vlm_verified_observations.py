@@ -70,6 +70,12 @@ def main() -> None:
     parser.add_argument("--max-candidates", type=int, default=6)
     parser.add_argument("--evidence-views", type=int, default=3)
     parser.add_argument("--min-entity-observations", type=int, default=2)
+    parser.add_argument(
+        "--min-siglip-score",
+        type=float,
+        default=0.10,
+        help="minimum absolute multi-view SigLIP similarity before VLM verification",
+    )
     parser.add_argument("--map-hard-negative-neighbors", type=int, default=3)
     parser.add_argument("--map-hard-negative-weight", type=float, default=1.0)
     parser.add_argument("--max-entities", type=int, default=3)
@@ -108,6 +114,7 @@ def main() -> None:
         max_candidates=args.max_candidates,
         top_views=args.evidence_views,
         min_observations=args.min_entity_observations,
+        min_siglip_score=args.min_siglip_score,
         map_negative_neighbors=args.map_hard_negative_neighbors,
         map_negative_weight=args.map_hard_negative_weight,
     )

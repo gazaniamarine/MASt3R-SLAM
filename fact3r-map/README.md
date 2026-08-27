@@ -970,15 +970,19 @@ conda run -n SAM2 python3 \
   --vlm-device-map auto \
   --max-candidates 6 \
   --evidence-views 3 \
+  --min-siglip-score 0.10 \
   --min-vlm-confidence 0.75 \
   --min-vlm-supporting-views 2
 ```
 
 This path does not ask for `--confounder` arguments. SigLIP first ranks only
 confirmed persistent entities using the positive query ensemble. It is unloaded
-before Qwen3-VL is loaded. For each shortlisted entity, Qwen receives up to three
-images; every image pairs the full frame with an enlarged crop and highlights the
-candidate mask in green. The VLM must return a structured `yes`, `no`, or
+before Qwen3-VL is loaded. Candidates below the absolute SigLIP threshold and
+persistent thin image-border fragments are rejected without invoking Qwen. For
+each shortlisted entity, Qwen receives up to three images; every image contains
+an overview, highlighted context, and a context-neutralized isolated target. The
+overview is location-only, preventing a nearby object from donating its label to
+the selected mask. The VLM must return a structured `yes`, `no`, or
 `uncertain` verdict, confidence, supporting frame IDs, its predicted object and
 visually confusable labels. Acceptance requires `yes`, the confidence threshold,
 and at least two valid supporting views. Invalid or ambiguous model output fails

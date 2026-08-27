@@ -95,6 +95,7 @@ def main() -> None:
     parser.add_argument("--max-candidates", type=int, default=3)
     parser.add_argument("--evidence-views", type=int, default=2)
     parser.add_argument("--min-entity-observations", type=int, default=2)
+    parser.add_argument("--min-siglip-score", type=float, default=0.10)
     parser.add_argument("--min-vlm-confidence", type=float, default=0.75)
     parser.add_argument("--min-vlm-supporting-views", type=int, default=2)
     parser.add_argument(
@@ -157,6 +158,7 @@ def main() -> None:
                 max_candidates=args.max_candidates,
                 top_views=args.evidence_views,
                 min_observations=args.min_entity_observations,
+                min_siglip_score=args.min_siglip_score,
             )
         )
     del encoder

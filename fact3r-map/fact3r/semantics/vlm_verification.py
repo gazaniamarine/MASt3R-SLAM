@@ -105,10 +105,11 @@ def build_verification_prompt(query: str, frame_ids: Sequence[int]) -> str:
     return (
         "You are verifying an object-memory retrieval for a mobile robot. "
         "All supplied images are different observations of ONE persistent 3D "
-        "entity. Each image contains a full-frame view on the left and an "
-        "enlarged crop on the right. The candidate mask is tinted bright green "
-        "with a green boundary. Judge only the highlighted pixels; do not use a "
-        "nearby or background object as evidence.\n\n"
+        "entity. Each image contains an overview, a highlighted context crop, "
+        "and an isolated target crop. Judge the entity from the isolated target "
+        "and highlighted pixels. The overview is only for location; an object "
+        "elsewhere in the overview is never evidence for the candidate. Reject "
+        "thin borders, image-edge strips, shadows, and incomplete fragments.\n\n"
         f"Target query: {json.dumps(query.strip())}\n"
         f"Frame IDs in image order: {list(frame_ids)}\n\n"
         "Use evidence across the views. Small size alone is not a rejection, "
@@ -141,10 +142,11 @@ def build_listwise_verification_prompt(
         image_index = end + 1
     return (
         "You are verifying object-memory retrieval candidates for a mobile robot. "
-        "Each candidate is one persistent 3D entity seen in multiple frames. "
-        "Each evidence image has a full-frame view on the left and an enlarged "
-        "crop on the right; the candidate itself is tinted bright green. Judge "
-        "only the highlighted pixels, never a nearby or background object.\n\n"
+        "Each candidate is one persistent entity seen in multiple frames. Each "
+        "evidence image has an overview, highlighted context, and an isolated "
+        "target. Judge the isolated target and highlighted pixels. The overview "
+        "is location-only: never use another object elsewhere in it as evidence. "
+        "Reject borders, edge strips, shadows, and incomplete fragments.\n\n"
         f"Target query: {json.dumps(query.strip())}\n"
         "Candidate-to-image mapping:\n"
         + "\n".join(candidate_lines)
@@ -562,6 +564,48 @@ def _context_crop(
     return image[y0:y1, x0:x1], selected[y0:y1, x0:x1]
 
 
+def pathological_border_sliver(
+    mask: object,
+    *,
+    max_thickness_fraction: float = 0.05,
+    min_aspect_ratio: float = 12.0,
+) -> bool:
+    """Detect SAM fragments that are thin strips attached to an image edge."""
+
+    selected = np.asarray(mask, dtype=bool)
+    if selected.ndim != 2 or not np.any(selected):
+        return True
+    rows, columns = np.nonzero(selected)
+    height, width = selected.shape
+    box_height = int(rows.max() - rows.min() + 1)
+    box_width = int(columns.max() - columns.min() + 1)
+    aspect = max(box_height / max(box_width, 1), box_width / max(box_height, 1))
+    edge_tolerance = max(2, int(round(0.005 * max(height, width))))
+    touches_edge = (
+        rows.min() <= edge_tolerance
+        or rows.max() >= height - 1 - edge_tolerance
+        or columns.min() <= edge_tolerance
+        or columns.max() >= width - 1 - edge_tolerance
+    )
+    thin = (
+        box_width / width <= max_thickness_fraction
+        or box_height / height <= max_thickness_fraction
+    )
+    return bool(touches_edge and thin and aspect >= min_aspect_ratio)
+
+
+def _isolated_target(rgb: object, mask: object) -> Image.Image:
+    """Show target appearance while neutralising all contextual distractors."""
+
+    image = _rgb_uint8(rgb)
+    selected = np.asarray(mask, dtype=bool)
+    isolated = np.full_like(image, 127)
+    isolated[selected] = image[selected]
+    isolated[mask_boundary(selected)] = [20, 255, 70]
+    crop_rgb, _ = _context_crop(isolated, selected, context_fraction=0.10)
+    return Image.fromarray(crop_rgb, mode="RGB")
+
+
 def _fit_panel(image: Image.Image, width: int, height: int) -> Image.Image:
     fitted = image.copy()
     fitted.thumbnail((width, height), Image.Resampling.LANCZOS)
@@ -582,9 +626,11 @@ def _render_evidence_view(
     overview = _highlight(rgb, mask)
     crop_rgb, crop_mask = _context_crop(rgb, mask)
     closeup = _highlight(crop_rgb, crop_mask)
+    isolated = _isolated_target(rgb, mask)
     rendered = Image.new("RGB", (1000, 420), (20, 20, 20))
-    rendered.paste(_fit_panel(overview, 600, 352), (8, 60))
-    rendered.paste(_fit_panel(closeup, 376, 352), (616, 60))
+    rendered.paste(_fit_panel(overview, 430, 352), (8, 60))
+    rendered.paste(_fit_panel(closeup, 270, 352), (446, 60))
+    rendered.paste(_fit_panel(isolated, 268, 352), (724, 60))
     draw = ImageDraw.Draw(rendered)
     draw.text(
         (10, 8),
@@ -593,7 +639,7 @@ def _render_evidence_view(
     )
     draw.text(
         (10, 33),
-        f"full frame (left) | enlarged target crop (right) | SigLIP={siglip_score:.3f}",
+        f"overview | highlighted context | isolated target | SigLIP={siglip_score:.3f}",
         fill=(185, 230, 195),
     )
     return rendered
@@ -628,6 +674,7 @@ def prepare_vlm_query(
     reference_mask_area: float = 4096.0,
     map_negative_neighbors: int = 3,
     map_negative_weight: float = 1.0,
+    min_siglip_score: float = 0.10,
 ) -> PreparedVLMQuery:
     """Shortlist candidates with SigLIP and render their multi-view evidence."""
 
@@ -635,6 +682,8 @@ def prepare_vlm_query(
         raise ValueError("query cannot be empty")
     if max_candidates <= 0:
         raise ValueError("max_candidates must be positive")
+    if not -1.0 <= min_siglip_score <= 1.0:
+        raise ValueError("min_siglip_score must be in [-1, 1]")
     started = perf_counter()
     manifest_path, manifest, embeddings = load_observation_index(index)
     if encoder.model_name != manifest["model"]:
@@ -656,11 +705,33 @@ def prepare_vlm_query(
         map_negative_neighbors=map_negative_neighbors,
         map_negative_weight=map_negative_weight,
     )
-    candidates = groups[:max_candidates]
+    proposal_directory = Path(str(manifest["source_proposals"]))
+    observations = manifest["observations"]
+    candidates: list[dict[str, object]] = []
+    for candidate in groups:
+        if float(candidate["positive_candidate_score"]) < min_siglip_score:
+            continue
+        valid_evidence: list[int] = []
+        for observation_index in candidate["ranked_observation_indices"]:
+            observation = observations[int(observation_index)]
+            with np.load(
+                proposal_directory / str(observation["mask_file"]),
+                allow_pickle=False,
+            ) as payload:
+                candidate_mask = np.asarray(payload["mask"], dtype=bool)
+            if not pathological_border_sliver(candidate_mask):
+                valid_evidence.append(int(observation_index))
+            if len(valid_evidence) >= top_views:
+                break
+        if len(valid_evidence) < min_observations:
+            continue
+        candidate["evidence_observation_indices"] = valid_evidence
+        candidates.append(candidate)
+        if len(candidates) >= max_candidates:
+            break
     output_directory = Path(output)
     evidence_directory = output_directory / "evidence"
     evidence_directory.mkdir(parents=True, exist_ok=True)
-    observations = manifest["observations"]
     needed_frames = {
         int(observations[index_value]["frame_id"])
         for candidate in candidates
@@ -671,7 +742,6 @@ def prepare_vlm_query(
         for keyframe in iter_exported_keyframes(manifest["source_keyframes"])
         if keyframe.frame_id in needed_frames
     }
-    proposal_directory = Path(str(manifest["source_proposals"]))
     for rank, candidate in enumerate(candidates, start=1):
         evidence_paths: list[Path] = []
         frame_ids: list[int] = []

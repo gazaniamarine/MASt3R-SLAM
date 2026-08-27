@@ -24,6 +24,9 @@ class MaskFilterConfig:
     min_descriptor_confidence: float | None = None
     min_lifted_points: int = 16
     full_anchor_coverage: float = 0.50
+    reject_border_slivers: bool = True
+    border_sliver_max_thickness_fraction: float = 0.05
+    border_sliver_min_aspect_ratio: float = 12.0
 
     def __post_init__(self) -> None:
         if (
@@ -45,6 +48,42 @@ class MaskFilterConfig:
                 raise ValueError(f"{name} must be in [0, 1]")
         if self.min_area_fraction > self.max_area_fraction:
             raise ValueError("min_area_fraction cannot exceed max_area_fraction")
+        if not 0.0 < self.border_sliver_max_thickness_fraction <= 1.0:
+            raise ValueError("border sliver thickness fraction must be in (0, 1]")
+        if self.border_sliver_min_aspect_ratio < 1.0:
+            raise ValueError("border sliver aspect ratio must be at least 1")
+
+
+def is_pathological_border_sliver(
+    mask: NDArray[np.bool_], config: MaskFilterConfig
+) -> bool:
+    """Reject narrow SAM regions that merely follow an image boundary."""
+
+    selected = np.asarray(mask, dtype=bool)
+    if not np.any(selected):
+        return True
+    rows, columns = np.nonzero(selected)
+    height, width = selected.shape
+    box_height = int(rows.max() - rows.min() + 1)
+    box_width = int(columns.max() - columns.min() + 1)
+    aspect = max(box_height / max(box_width, 1), box_width / max(box_height, 1))
+    edge_tolerance = max(2, int(round(0.005 * max(height, width))))
+    touches_edge = (
+        rows.min() <= edge_tolerance
+        or rows.max() >= height - 1 - edge_tolerance
+        or columns.min() <= edge_tolerance
+        or columns.max() >= width - 1 - edge_tolerance
+    )
+    thin = (
+        box_width / width <= config.border_sliver_max_thickness_fraction
+        or box_height / height <= config.border_sliver_max_thickness_fraction
+    )
+    return bool(
+        config.reject_border_slivers
+        and touches_edge
+        and thin
+        and aspect >= config.border_sliver_min_aspect_ratio
+    )
 
 
 def erode_mask(mask: NDArray[np.bool_], iterations: int) -> NDArray[np.bool_]:
@@ -190,6 +229,8 @@ def _filter_with_allowed_pixels(
             mask &= allowed_pixels
         mask = erode_mask(mask, config.erosion_pixels)
         mask = remove_small_components(mask, config.min_component_pixels)
+        if is_pathological_border_sliver(mask, config):
+            continue
         area = int(mask.sum())
         if area < min_area or area > max_area:
             continue
