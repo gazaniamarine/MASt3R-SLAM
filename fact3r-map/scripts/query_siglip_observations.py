@@ -58,6 +58,13 @@ def main() -> None:
     )
     parser.add_argument("--reference-mask-area", type=float, default=4096.0)
     parser.add_argument(
+        "--no-map-hard-negatives",
+        action="store_true",
+        help="disable automatic negatives from visually nearest map entities",
+    )
+    parser.add_argument("--map-hard-negative-neighbors", type=int, default=3)
+    parser.add_argument("--map-hard-negative-weight", type=float, default=1.0)
+    parser.add_argument(
         "--include-unconfirmed",
         action="store_true",
         help="also rank pending/unassigned groups; disabled for navigation by default",
@@ -85,6 +92,9 @@ def main() -> None:
         min_view_margin=args.min_view_margin,
         min_entity_margin=args.min_entity_margin,
         reference_mask_area=args.reference_mask_area,
+        automatic_map_negatives=not args.no_map_hard_negatives,
+        map_negative_neighbors=args.map_hard_negative_neighbors,
+        map_negative_weight=args.map_hard_negative_weight,
         max_observations_per_entity=args.max_observations_per_entity,
         gif_width=args.gif_width,
         gif_duration_ms=args.gif_duration_ms,

@@ -22,6 +22,8 @@ class LiftedProposal:
     mast3r_descriptors: NDArray[np.floating] | None
     descriptor_confidence: NDArray[np.floating] | None
     source_mask_area: int
+    appearance_descriptor: NDArray[np.floating] | None = None
+    appearance_reliability: float | None = None
     parent_proposal_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -64,6 +66,36 @@ class LiftedProposal:
                     "descriptor_confidence cannot be set without descriptors"
                 )
 
+        appearance_descriptor = None
+        if self.appearance_descriptor is not None:
+            appearance_descriptor = np.asarray(
+                self.appearance_descriptor, dtype=np.float32
+            ).reshape(-1)
+            if len(appearance_descriptor) == 0 or not np.all(
+                np.isfinite(appearance_descriptor)
+            ):
+                raise ValueError("appearance_descriptor must be a finite vector")
+            norm = float(np.linalg.norm(appearance_descriptor))
+            if norm <= 1e-12:
+                raise ValueError("appearance_descriptor cannot be a zero vector")
+            appearance_descriptor = np.ascontiguousarray(
+                appearance_descriptor / norm, dtype=np.float32
+            )
+
+        appearance_reliability = self.appearance_reliability
+        if appearance_reliability is not None:
+            appearance_reliability = float(appearance_reliability)
+            if appearance_descriptor is None:
+                raise ValueError(
+                    "appearance_reliability requires appearance_descriptor"
+                )
+            if not np.isfinite(appearance_reliability) or not (
+                0.0 <= appearance_reliability <= 1.0
+            ):
+                raise ValueError(
+                    "appearance_reliability must be finite and in [0, 1]"
+                )
+
         object.__setattr__(self, "pixel_rc", np.ascontiguousarray(pixels))
         object.__setattr__(self, "points_world", np.ascontiguousarray(points))
         object.__setattr__(self, "colours_rgb", np.ascontiguousarray(colours))
@@ -74,6 +106,12 @@ class LiftedProposal:
         )
         object.__setattr__(self, "mast3r_descriptors", descriptors)
         object.__setattr__(self, "descriptor_confidence", descriptor_confidence)
+        object.__setattr__(self, "appearance_descriptor", appearance_descriptor)
+        object.__setattr__(
+            self,
+            "appearance_reliability",
+            appearance_reliability,
+        )
 
     @property
     def centroid_xyz(self) -> NDArray[np.floating]:
@@ -153,4 +191,3 @@ def lift_mask_to_3d(
         source_mask_area=source_mask_area,
         parent_proposal_id=parent_proposal_id,
     )
-

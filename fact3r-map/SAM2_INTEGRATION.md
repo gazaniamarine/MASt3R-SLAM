@@ -299,23 +299,36 @@ entities, red boundaries denote newly created IDs, yellow denotes pending tracks
 and cyan denotes known tracks held without a memory update. Use `--stride 2` for
 a smaller temporal sample or `--no-gif` when only full-resolution PNGs are needed.
 
-### 8. Encode every proposal for semantic recollection
+### 8. Encode once before UOT and reuse for semantic recollection
 
-Reuse the completed delayed-UOT artifacts to attach each SigLIP2 mask embedding to
-its frame, track and persistent entity:
+Encode each mask before association so SigLIP2 can disambiguate spatially valid
+entity candidates. This index deliberately has no mapping assignments yet:
 
 ```bash
 conda run -n SAM2 python3 \
   fact3r-map/scripts/build_siglip_observation_index.py \
   --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
   --proposals logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
-  --mapping logs/hm3d/calib_fact3r/fact3r_delayed_commitment_uot/SCENE_NAME \
+  --output logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/SCENE_NAME \
   --device 0
 ```
 
-This stage batches masked crops and records its actual masks-per-second timing.
-It also retrospectively resolves early pending observations using the final
-track-to-entity commitments.
+Pass that artifact to delayed UOT with
+`--appearance-index logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/SCENE_NAME`.
+After mapping, attach the final identities without running SigLIP2 again:
+
+```bash
+conda run -n SAM2 python3 fact3r-map/scripts/attach_siglip_mapping.py \
+  --index logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/SCENE_NAME \
+  --mapping logs/hm3d/calib_fact3r/fact3r_appearance_uot/SCENE_NAME \
+  --output logs/hm3d/calib_fact3r/fact3r_siglip_observations/SCENE_NAME
+```
+
+The association reliability combines SAM2 score, 3D lift retention, short-term
+track IoU and mask resolution. Each persistent entity stores at most eight
+diverse views, and uncertain UOT matches cannot update that appearance memory.
+The exact equations and thresholds are in
+[`FACT3R_METHODS.tex`](FACT3R_METHODS.tex).
 
 ### 9. Query an object and render all of its frames
 

@@ -18,8 +18,13 @@ from fact3r.semantics.observation_index import (  # noqa: E402
 )
 
 
-def _default_output(proposals: Path) -> Path:
-    return proposals.parent.parent / "fact3r_siglip_observations" / proposals.name
+def _default_output(proposals: Path, mapping: Path | None) -> Path:
+    stage = (
+        "fact3r_siglip_pre_uot"
+        if mapping is None
+        else "fact3r_siglip_observations"
+    )
+    return proposals.parent.parent / stage / proposals.name
 
 
 def main() -> None:
@@ -43,7 +48,7 @@ def main() -> None:
     parser.add_argument("--outside-mask-alpha", type=float, default=0.20)
     args = parser.parse_args()
 
-    output = args.output or _default_output(args.proposals)
+    output = args.output or _default_output(args.proposals, args.mapping)
     print(f"Loading {args.model} on {args.device}...")
     encoder = Siglip2Encoder(args.model, device=args.device)
     manifest_path = build_observation_index(

@@ -1,0 +1,575 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=25mm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\1}{\bm{1}}
+\newcommand{\KL}{\operatorname{KL}}
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\pospart}[1]{[\,#1\,]_{+}}
+
+\title{Reliability-Gated Multi-View Appearance Memory for\\
+Visibility-Conditioned Unbalanced Entity Association}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document specifies the implemented Fact3R-Map pipeline for persistent
+entity mapping and open-vocabulary recollection. Complete-frame SAM2 masks are
+lifted through MASt3R-SLAM geometry, linked over short intervals with SAM2 video
+propagation, embedded once with SigLIP2, and jointly associated to persistent 3D
+entities with visibility-conditioned unbalanced optimal transport (UOT). The
+main extension is a reliability-gated, bounded multi-view appearance memory.
+Appearance helps distinguish geometrically similar candidates, but cannot
+bypass 3D spatial support, and uncertain assignments cannot update appearance
+memory. At query time, visually neighbouring map entities automatically act as
+hard negatives; Qwen3-VL is retained as the final verifier for a small ambiguous
+shortlist. All formulae and thresholds below correspond to the implementation.
+\end{abstract}
+
+\section{Problem and design objective}
+
+At time $t$, a complete frame produces proposals
+$\mathcal{P}_t=\{P_{ti}\}_{i=1}^{N_t}$. The persistent map before processing the
+frame is $\mathcal{E}_{t-1}=\{E_j\}_{j=1}^{M_{t-1}}$. The number of proposals
+varies from frame to frame, masks can fragment or merge, and many old entities
+are outside the current camera view. The goal is therefore not a square
+one-to-one assignment. We seek a partial, confidence-aware correspondence plus
+explicit residual mass for births, fragments, misses, and occlusion.
+
+The implemented design follows four constraints:
+\begin{enumerate}[leftmargin=*]
+    \item all masks in a frame are compared jointly;
+    \item geometry determines which proposal--entity pairs are possible;
+    \item appearance is a soft identity cue whose influence is scaled by its
+          measured reliability;
+    \item semantic memory changes only after stricter confidence gates than
+          those required for a geometric map update.
+\end{enumerate}
+
+\section{Pipeline}
+
+For each finite video or HM3D sequence, the processing order is
+\begin{equation}
+\text{RGB}ightarrow\text{MASt3R-SLAM keyframes}ightarrow
+\text{SAM2 masks}ightarrow\text{SAM2 tracklets}ightarrow
+\text{SigLIP2 embeddings}ightarrow\text{UOT map}ightarrow
+\text{searchable observation index}.
+\end{equation}
+The SigLIP2 image embeddings are computed before UOT, then reused after UOT by
+attaching the final entity assignments. Thus image encoding is performed once,
+not once for association and again for retrieval.
+
+\section{Proposal construction}
+
+Let $M_{ti}\subset\Omega_t$ be a cleaned SAM2 mask. MASt3R-SLAM supplies a
+world-aligned point map $X_t^W(u)$ and geometry confidence for image pixel $u$.
+The lifted proposal geometry is
+\begin{equation}
+\mathcal{X}_{ti}=\{X_t^W(u):u\in M_{ti},\ u\text{ passes the geometry filter}\}.
+\end{equation}
+Each proposal stores its centroid $\bm{x}_{ti}$, 3D bounding box $B_{ti}$,
+colours, optional MASt3R descriptors, original mask area $|M_{ti}|$, and the
+number of retained world points $|\mathcal{X}_{ti}|$.
+
+For short-term continuity, SAM2 video propagation yields a track identifier and
+an adjacent-frame link IoU $q^{\mathrm{trk}}_{ti}$. This signal is only a soft
+cue; it is not treated as a permanent identity.
+
+\subsection{Masked SigLIP2 observation}
+
+A contextual crop is taken around $M_{ti}$. Pixels inside the mask are retained,
+while pixels outside the mask are moved towards neutral grey:
+\begin{equation}
+\widetilde I_{ti}(u)=
+\begin{cases}
+I_t(u), & u\in M_{ti},\\
+\alpha I_t(u)+(1-\alpha)\,127, & u\notin M_{ti},
+\end{cases}
+\qquad \alpha=0.20.
+\end{equation}
+The crop includes a $15\%$ context margin by default. SigLIP2 produces a
+unit-normalized appearance vector
+\begin{equation}
+\bm{z}_{ti}=\frac{f_{\mathrm{img}}(\widetilde I_{ti})}
+{\|f_{\mathrm{img}}(\widetilde I_{ti})\|_2}.
+\end{equation}
+
+\section{Reliability of one appearance observation}
+
+Four already available signals are converted to $[0,1]$:
+\begin{align}
+q^{\mathrm{sam}}_{ti} &= \clip(\text{SAM2 proposal score},0,1),\\
+q^{\mathrm{lift}}_{ti} &= \min\left(1,
+\frac{|\mathcal{X}_{ti}|}{\max(|M_{ti}|,1)}\right),\\
+q^{\mathrm{trk}}_{ti} &=
+\begin{cases}
+\clip(\text{link IoU},0,1),&\text{if available},\\
+0.75,&\text{otherwise},
+\end{cases}\\
+q^{\mathrm{res}}_{ti} &= \min\left(1,
+\sqrt{\frac{|M_{ti}|}{4096}}\right).
+\end{align}
+The appearance reliability is their geometric mean,
+\begin{equation}
+r_{ti}=\left(q^{\mathrm{sam}}_{ti}
+q^{\mathrm{lift}}_{ti}q^{\mathrm{trk}}_{ti}
+q^{\mathrm{res}}_{ti}\right)^{1/4}.
+\label{eq:reliability}
+\end{equation}
+The geometric mean is intentional: a high segmentation score cannot completely
+hide a nearly empty 3D lift, a poor temporal link, or an extremely low-resolution
+crop. It also avoids training a calibration network before labelled association
+data exist.
+
+\section{Persistent entity state}
+
+Entity $E_j$ stores 3D geometry $\mathcal{Y}_j$, centroid $\bm{y}_j$, bounding
+box $B_j$, colour and MASt3R statistics, observation count, timestamps, and a
+bounded appearance memory
+\begin{equation}
+\mathcal{B}_j=\{(\bm{m}_{jk},r_{jk})\}_{k=1}^{K_j},
+\qquad \|\bm{m}_{jk}\|_2=1,\qquad K_j\leq K_{\max}=8.
+\end{equation}
+Views are not averaged into one vector because front, side, distant, and
+partially occluded observations can occupy different locations in the embedding
+space.
+
+For an admitted new view $(\bm z,r)$, let
+$k^*=\arg\max_k\bm m_{jk}^{\top}\bm z$.
+\begin{itemize}[leftmargin=*]
+    \item If $\bm m_{jk^*}^{\top}\bm z\geq0.95$, the observation is redundant.
+          It replaces view $k^*$ only when $r>r_{jk^*}$.
+    \item If it is non-redundant and $K_j<8$, it is appended.
+    \item If the bank is full, it replaces the least reliable stored view only
+          when its reliability is higher.
+\end{itemize}
+This rule bounds memory, maintains view diversity, and prevents repeated weak
+views from dominating an entity prototype.
+
+\section{Proposal--entity cost}
+
+\subsection{Strict spatial support}
+
+Appearance is never allowed to connect arbitrary locations. A pair $(i,j)$ has
+support only when
+\begin{equation}
+A_{ij}=\1\!\left[
+\|\bm{x}_{ti}-\bm{y}_j\|_2\leq1.0\text{ m}
+\quad\lor\quad
+\operatorname{overlap}(B_{ti}^{+0.05},B_j^{+0.05})
+\right].
+\label{eq:support}
+\end{equation}
+Every pair with $A_{ij}=0$ receives infinite cost and exactly zero transport
+mass.
+
+\subsection{Geometric and visual cues}
+
+For supported pairs, the existing normalized components are
+\begin{align}
+c^{\mathrm{cen}}_{ij}
+&=\min\left(\frac{\|\bm{x}_{ti}-\bm{y}_j\|_2}{1.0\text{ m}},1\right),\\
+c^{\mathrm{box}}_{ij}
+&=1-\operatorname{IoU}_{3D}(B_{ti}^{+0.05},B_j^{+0.05}),\\
+c^{\mathrm{geo}}_{ij}
+&=1-\frac{1}{2}\left[
+\frac{1}{|\widehat{\mathcal X}_{ti}|}
+\sum_{\bm p\in\widehat{\mathcal X}_{ti}}
+\1\!\left(\min_{\bm q\in\widehat{\mathcal Y}_j}
+\|\bm p-\bm q\|_2\leq0.08\right)
+\right.\\[-0.4em]
+&\hspace{37mm}\left.+
+\frac{1}{|\widehat{\mathcal Y}_j|}
+\sum_{\bm q\in\widehat{\mathcal Y}_j}
+\1\!\left(\min_{\bm p\in\widehat{\mathcal X}_{ti}}
+\|\bm q-\bm p\|_2\leq0.08\right)
+\right],
+\end{align}
+where each point set is deterministically sampled to at most 256 points.
+Normalized colour distance and pooled MASt3R cosine distance provide
+$c^{\mathrm{col}}_{ij}$ and $c^{\mathrm{desc}}_{ij}$ when available.
+
+\subsection{Reliability-weighted soft best-view appearance}
+
+Stored-view weights are
+\begin{equation}
+\alpha_{jk}=\frac{r_{jk}}{\sum_{\ell=1}^{K_j}r_{j\ell}}.
+\end{equation}
+Rather than compare against a mean embedding or use a discontinuous maximum,
+the appearance similarity is a reliability-weighted smooth maximum,
+\begin{equation}
+s^{\mathrm{app}}_{ij}
+=\tau\log\sum_{k=1}^{K_j}
+\alpha_{jk}\exp\left(
+\frac{\bm z_{ti}^{\top}\bm m_{jk}}{\tau}\right),
+\qquad \tau=0.07,
+\end{equation}
+and
+\begin{equation}
+c^{\mathrm{app}}_{ij}=\frac{1-\clip(s^{\mathrm{app}}_{ij},-1,1)}{2}.
+\label{eq:appearance-cost}
+\end{equation}
+Its pair reliability is
+\begin{equation}
+\rho^{\mathrm{app}}_{ij}=
+\sqrt{r_{ti}\left(\frac{1}{K_j}\sum_{k=1}^{K_j}r_{jk}\right)}.
+\end{equation}
+Thus poor evidence smoothly reduces the appearance weight instead of producing
+an overconfident hard rejection.
+
+If a SAM2 tracklet points to entity $j^*$ with confidence $h_i$, its temporal
+cost is $c^{\mathrm{tmp}}_{ij}=\1[j\neq j^*]$ and its active weight is
+$0.25h_i$. This cue also remains inside the spatial support in
+Eq.~\eqref{eq:support}.
+
+\subsection{Combined cost}
+
+Let $\mathcal{L}_{ij}$ be the cues available for pair $(i,j)$. The final cost is
+the active-weight normalized sum
+\begin{equation}
+C_{ij}=\frac{\sum_{\ell\in\mathcal L_{ij}}w^{ij}_{\ell}c^{\ell}_{ij}}
+{\sum_{\ell\in\mathcal L_{ij}}w^{ij}_{\ell}},
+\qquad A_{ij}=1.
+\label{eq:combined-cost}
+\end{equation}
+The default base weights are shown in Table~\ref{tab:cost-weights}. Missing cues
+are omitted rather than assigned a bad score.
+
+\begin{table}[h]
+\centering
+\caption{Default pairwise cost weights.}
+\label{tab:cost-weights}
+\begin{tabular}{lccccccc}
+\toprule
+Cue & centroid & box & geometry & colour & MASt3R & SigLIP & tracklet\\
+\midrule
+Weight & .20 & .15 & .45 & .05 & .15 & $.25\rho^{\rm app}_{ij}$ & $.25h_i$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Visibility-conditioned unbalanced transport}
+
+\subsection{Proposal supply}
+
+Proposal quality combines 3D retention and temporal support:
+\begin{equation}
+q_i=0.70q^{\mathrm{lift}}_{ti}+0.30q^{\mathrm{temp}}_{ti},
+\qquad
+q^{\mathrm{temp}}_{ti}=
+\begin{cases}h_i,&\text{track hint exists},\\0.5,&\text{otherwise}.
+\end{cases}
+\end{equation}
+The proposal mass is $a_i=\max(q_i,10^{-3})$.
+
+\subsection{Entity demand from visibility}
+
+Up to 512 stored entity points are projected into the current calibrated view.
+A projected point is visible if it lies in the image and its predicted depth is
+not more than $0.15$ m behind the observed MASt3R depth. If $S_j$ points are
+sampled and $V_j$ pass both tests,
+\begin{equation}
+v_j=\clip\left(\frac{V_j}{S_j},0,1\right),\qquad b_j=v_j.
+\end{equation}
+An active candidate column is floored at $10^{-3}$ for numerical stability.
+Without intrinsics the explicit fallback is $v_j=1$.
+
+\subsection{UOT objective}
+
+The transport plan $\Pi\in\R_+^{N_t\times M_{t-1}}$ solves
+\begin{align}
+\min_{\Pi\geq0}\quad
+&\langle \Pi,C\rangle
++\varepsilon\sum_{ij}\Pi_{ij}(\log\Pi_{ij}-1)\\
+&+\sum_i\lambda_i\KL((\Pi\1)_i\,\|\,a_i)
++\sum_j\gamma_j\KL((\Pi^\top\1)_j\,\|\,b_j),\\
+\text{subject to}\quad &\Pi_{ij}=0\quad\text{when }A_{ij}=0,
+\label{eq:uot}
+\end{align}
+with $\varepsilon=0.05$ and scalar generalized KL
+\begin{equation}
+\KL(x\|y)=x\log(x/y)-x+y.
+\end{equation}
+Evidence controls how expensive it is to violate each marginal:
+\begin{align}
+\lambda_i&=0.05+q_i(0.50-0.05),\\
+\gamma_j&=0.02+v_j(0.50-0.02).
+\end{align}
+A weak proposal may discard more mass, and an occluded or out-of-view entity
+does not demand a match. This replaces a manually sized shared dustbin with
+typed, evidence-dependent residuals.
+
+\subsection{Generalized Sinkhorn updates}
+
+On the active strict support, define $K_{ij}=\exp(-C_{ij}/\varepsilon)$ and zero
+elsewhere. Let
+\begin{equation}
+\theta_i=\frac{\lambda_i}{\lambda_i+\varepsilon},\qquad
+\phi_j=\frac{\gamma_j}{\gamma_j+\varepsilon}.
+\end{equation}
+Starting with $\bm u=\1$ and $\bm v=\1$, the implemented fixed-point updates
+are
+\begin{align}
+u_i&\leftarrow\left(\frac{a_i}{(K\bm v)_i}\right)^{\theta_i},\\
+v_j&\leftarrow\left(\frac{b_j}{(K^\top\bm u)_j}\right)^{\phi_j},\\
+\Pi&=\operatorname{diag}(\bm u)K\operatorname{diag}(\bm v).
+\end{align}
+They are evaluated in the log domain, for at most 2000 iterations, until the
+maximum scaling change is below $10^{-7}$.
+
+\subsection{Residual interpretation and hard decisions}
+
+The proposal birth/noise residual and entity miss/occlusion residual are
+\begin{align}
+\beta_i&=\pospart{a_i-\sum_j\Pi_{ij}},\\
+\mu_j&=\pospart{b_j-\sum_i\Pi_{ij}}.
+\end{align}
+Excess mass in either direction is stored separately rather than silently
+clipped. For proposal $i$, define
+\begin{equation}
+R_i=\frac{\sum_j\Pi_{ij}}{a_i},\qquad
+p_{ij}=\frac{\Pi_{ij}}{\sum_k\Pi_{ik}}.
+\end{equation}
+A proposal becomes a match only if:
+\begin{enumerate}[leftmargin=*]
+    \item at least one supported candidate has $C_{ij}\leq0.65$;
+    \item $R_i\geq0.25$;
+    \item for the maximum-mass viable candidate, $p_{ij}\geq0.50$.
+\end{enumerate}
+Otherwise its reason is recorded as empty map, no spatial candidate, cost above
+threshold, low retained mass, or ambiguous transport.
+
+\section{Delayed entity birth}
+
+An unmatched mask does not immediately become a persistent entity. Residual
+evidence is accumulated under its SAM2 track ID. A new entity is committed only
+when all default conditions hold:
+\begin{align}
+n_{\mathrm{obs}}&\geq3,\\
+\frac{1}{n_{\mathrm{obs}}}\sum_s\frac{\beta_s}{a_s}&\geq0.55,\\
+\operatorname{median}_s(\operatorname{IoU}^{\mathrm{link}}_s)&\geq0.60,\\
+\max_s\|\bm x_s-\bm x_{s-1}\|_2&\leq0.30\text{ m}.
+\end{align}
+Single-frame fragments expire by default. Once a track is committed, a temporary
+UOT rejection cannot create a duplicate entity with the same track ID.
+
+\section{Confidence-gated appearance-memory update}
+
+Geometric state and semantic appearance state use different update thresholds.
+For a matched pair $(i,j)$, the new appearance view is eligible only if
+\begin{equation}
+r_{ti}\geq0.45,\qquad p_{ij}\geq0.70,\qquad R_i\geq0.50,
+\label{eq:memory-gate}
+\end{equation}
+and, when a link IoU exists,
+\begin{equation}
+\operatorname{IoU}^{\mathrm{link}}_{ti}\geq0.60.
+\end{equation}
+It must then pass the diverse-bank rule in Section 5. A match may therefore
+update 3D geometry without updating appearance memory. This separation is the
+main protection against confirmation feedback: a weak semantic match is not
+allowed to make its own future appearance score stronger.
+
+Every decision is saved with its reliability, conditional probability, retained
+ratio, track IoU, update flag, and blocking reasons. The entity artifact stores
+its appearance bank, per-view reliabilities, view count, and mean reliability.
+
+\section{Open-vocabulary retrieval without manual confounders}
+
+After mapping, the pre-UOT embedding matrix is reused unchanged and the final
+entity/track assignments are attached. Let $\bm e_n$ be one normalized stored
+observation embedding. Four prompt templates are embedded for query text $q$,
+and their mean similarity gives
+\begin{equation}
+s_n^+(q)=\frac{1}{L}\sum_{\ell=1}^{L}
+\bm e_n^\top\bm t_{\ell}(q).
+\end{equation}
+
+\subsection{Map-derived hard negatives}
+
+Each confirmed entity has a normalized map prototype
+\begin{equation}
+\bm p_j=\frac{\sum_{n\in E_j}\bm e_n}
+{\left\|\sum_{n\in E_j}\bm e_n\right\|_2}.
+\end{equation}
+For entity $j$, choose the three other entities with largest
+$\bm p_j^\top\bm p_k$; call this set $\mathcal N_3(j)$. These are the objects the
+current map itself says are visually confusable. With normalized mean query
+embedding $\overline{\bm t}(q)$, the automatic hard-negative score is
+\begin{equation}
+h_j(q)=\max_{k\in\mathcal N_3(j)}
+\overline{\bm t}(q)^\top\bm p_k.
+\label{eq:map-negative}
+\end{equation}
+No object-specific list such as ``clock versus picture frame'' is required.
+Generic background/fragment text negatives remain a safety floor. For view $n$
+of entity $j$,
+\begin{align}
+s_n^-(q)&=\max\left(
+\max_g\bm e_n^\top\bm t_g^-,\ h_j(q)\right),\\
+m_n(q)&=s_n^+(q)-s_n^-(q).
+\end{align}
+
+The view quality used during aggregation is
+\begin{equation}
+\omega_n=q_n^{\mathrm{sam}}q_n^{\mathrm{assoc}}
+\min\left(1,\sqrt{\frac{|M_n|}{4096}}\right).
+\end{equation}
+The entity score is the $\omega_n$-weighted mean of its best three supporting
+view margins. A fast retrieval requires at least two views with
+$m_n\geq0.02$ and entity margin at least $0.02$. This particularly suppresses
+small-object false positives that appear plausible in only one frame.
+
+\subsection{Qwen3-VL final verification}
+
+For difficult small objects, only a small SigLIP-ranked set of confirmed
+persistent entities is sent to Qwen3-VL. Each candidate is represented by up to
+three highlighted views, and several candidates are verified listwise in one
+generation. The verifier is instructed to judge only highlighted pixels. A
+candidate is accepted only when the structured verdict is ``yes'', confidence
+is at least $0.75$, and at least two supplied frames support it. Invalid or
+missing structured output fails closed. Verdicts are cached by query, model,
+entity ID, prompt version, and evidence-image bytes.
+
+Qwen3-VL cannot alter geometric identities; it only verifies the final semantic
+retrieval shortlist. This keeps the common query path fast while reserving the
+large model for ambiguity.
+
+\section{Default implementation values}
+
+\begin{table}[h]
+\centering
+\caption{Important implemented defaults.}
+\begin{tabular}{lll}
+\toprule
+Subsystem & Parameter & Value\\
+\midrule
+Spatial support & centroid radius / box padding & 1.0 m / 0.05 m\\
+Geometry & point-match radius / samples & 0.08 m / 256\\
+Appearance cost & weight / temperature & 0.25 / 0.07\\
+Appearance bank & maximum views / redundancy cosine & 8 / 0.95\\
+Appearance reliability & reference mask area / missing track quality & 4096 / 0.75\\
+UOT & entropy / iterations / tolerance & 0.05 / 2000 / $10^{-7}$\\
+UOT hard match & cost / retained / conditional & 0.65 / 0.25 / 0.50\\
+Memory update & reliability / retained / conditional / IoU & .45 / .50 / .70 / .60\\
+Delayed birth & observations / residual / IoU / step & 3 / .55 / .60 / .30 m\\
+Retrieval & map neighbours / views / margin & 3 / 3 / .02\\
+VLM acceptance & confidence / supporting views & .75 / 2\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{What changed and why}
+
+The implementation makes six concrete changes to the earlier geometry-only
+delayed-UOT mapper:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Pre-UOT SigLIP2 encoding.} Appearance is available during
+          association and the expensive image pass is reused for retrieval.
+    \item \textbf{Reliability-scaled appearance cost.} Appearance resolves
+          nearby repeated geometry, but weak masks contribute little and cannot
+          create non-spatial matches.
+    \item \textbf{Bounded diverse entity memory.} Eight explicit views preserve
+          viewpoint variation without unbounded storage or destructive averaging.
+    \item \textbf{Confidence-gated updates.} Stricter semantic-memory gates break
+          the self-reinforcing error loop caused by uncertain assignments.
+    \item \textbf{Map-derived negatives.} The map automatically supplies the
+          closest visual competitors for every query, removing the need to type
+          object-specific confounders.
+    \item \textbf{Small final VLM stage.} Qwen3-VL checks highlighted multi-view
+          evidence only after fast retrieval, rather than scanning every mask.
+\end{enumerate}
+
+The strongest research claim should be the interaction of visibility-conditioned
+residual transport, reliability-scaled multi-view identity memory, and separate
+memory-update confidence---not the independent use of MASt3R, SAM2, SigLIP2, or
+Qwen3-VL.
+
+\section{Reproducible HM3D command sequence}
+
+For scene \texttt{00800-TEEsavR23oF}, run:
+\begin{verbatim}
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/build_siglip_observation_index.py \
+  --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/00800-TEEsavR23oF \
+  --proposals logs/hm3d/calib_fact3r/fact3r_sam2/00800-TEEsavR23oF \
+  --output logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/00800-TEEsavR23oF \
+  --device 0
+
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/run_visibility_residual_transport.py \
+  --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/00800-TEEsavR23oF \
+  --proposals logs/hm3d/calib_fact3r/fact3r_sam2/00800-TEEsavR23oF \
+  --tracklets logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/00800-TEEsavR23oF \
+  --appearance-index \
+    logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/00800-TEEsavR23oF \
+  --output \
+    logs/hm3d/calib_fact3r/fact3r_appearance_uot/00800-TEEsavR23oF \
+  --delayed-commitment
+
+conda run -n SAM2 python3 fact3r-map/scripts/attach_siglip_mapping.py \
+  --index logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/00800-TEEsavR23oF \
+  --mapping logs/hm3d/calib_fact3r/fact3r_appearance_uot/00800-TEEsavR23oF \
+  --output \
+    logs/hm3d/calib_fact3r/fact3r_siglip_observations/00800-TEEsavR23oF
+\end{verbatim}
+
+Fast map-derived-negative retrieval is then
+\begin{verbatim}
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/query_siglip_observations.py \
+  --index \
+    logs/hm3d/calib_fact3r/fact3r_siglip_observations/00800-TEEsavR23oF \
+  --query "a clock" --device 0
+\end{verbatim}
+and Qwen verification is
+\begin{verbatim}
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/query_vlm_verified_observations.py \
+  --index \
+    logs/hm3d/calib_fact3r/fact3r_siglip_observations/00800-TEEsavR23oF \
+  --query "a clock" --siglip-device 0 \
+  --vlm-model Qwen/Qwen3-VL-8B-Instruct \
+  --max-candidates 3 --evidence-views 3
+\end{verbatim}
+
+\section{Required evaluation}
+
+The method should be reported through controlled ablations:
+\begin{enumerate}[leftmargin=*]
+    \item geometry-only delayed UOT;
+    \item $+$ unweighted single-vector appearance;
+    \item $+$ reliability-scaled eight-view appearance;
+    \item $+$ confidence-gated memory updates;
+    \item retrieval with generic negatives versus map-derived negatives;
+    \item fast retrieval versus final Qwen3-VL verification.
+\end{enumerate}
+Mapping metrics should include identity switches, entity over-fragmentation,
+duplicate births, unmatched reasons, and memory-update rejection reasons.
+Retrieval metrics should include entity-level precision/recall, small-object false
+positives, supporting-view count, query time, and VLM cache hit rate. The fixed
+thresholds above are initial defaults and should be tuned only on a validation
+split, never on the final evaluation scenes.
+
+\section{Limitations}
+
+The current method assumes a mostly static scene and sufficiently aligned
+MASt3R-SLAM geometry. SigLIP2 is not trained specifically for tiny masked indoor
+parts, so very small or visually featureless objects may remain ambiguous.
+Map-derived negatives require at least two confirmed entities and can suppress a
+true result when two physical instances are nearly identical; the final
+multi-view verifier is intended to handle that case. Appearance does not repair
+a wrong 3D spatial gate, and Qwen3-VL adds substantial model-load latency on an
+uncached query. These are measurable limitations rather than hidden failure
+modes because the pipeline saves transport, reliability, update, and verification
+diagnostics for audit.
+
+\end{document}

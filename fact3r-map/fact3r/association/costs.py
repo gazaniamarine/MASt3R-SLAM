@@ -26,6 +26,8 @@ class PairwiseCostConfig:
     geometry_weight: float = 0.45
     colour_weight: float = 0.05
     descriptor_weight: float = 0.15
+    appearance_weight: float = 0.25
+    appearance_temperature: float = 0.07
     temporal_weight: float = 0.25
 
     def __post_init__(self) -> None:
@@ -43,12 +45,15 @@ class PairwiseCostConfig:
             self.geometry_weight,
             self.colour_weight,
             self.descriptor_weight,
+            self.appearance_weight,
             self.temporal_weight,
         )
         if any(weight < 0.0 for weight in weights):
             raise ValueError("pairwise cost weights cannot be negative")
         if sum(weights) <= 0.0:
             raise ValueError("at least one pairwise cost weight must be positive")
+        if self.appearance_temperature <= 0.0:
+            raise ValueError("appearance_temperature must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +246,52 @@ def _descriptor_cost(
     return 0.5 * (1.0 - cosine)
 
 
+def _appearance_cost(
+    proposal_descriptor: NDArray[np.floating] | None,
+    entity_bank: NDArray[np.floating] | None,
+    entity_reliability: NDArray[np.floating] | None,
+    temperature: float,
+) -> tuple[float, float] | None:
+    """Return soft best-view cosine cost and entity-memory reliability."""
+
+    if proposal_descriptor is None or entity_bank is None:
+        return None
+    query = np.asarray(proposal_descriptor, dtype=np.float64).reshape(-1)
+    bank = np.asarray(entity_bank, dtype=np.float64)
+    if bank.ndim != 2 or len(bank) == 0 or bank.shape[1:] != query.shape:
+        return None
+    query_norm = float(np.linalg.norm(query))
+    bank_norms = np.linalg.norm(bank, axis=1)
+    valid = (
+        np.all(np.isfinite(bank), axis=1)
+        & np.isfinite(bank_norms)
+        & (bank_norms > 1e-12)
+    )
+    if not np.isfinite(query_norm) or query_norm <= 1e-12 or not np.any(valid):
+        return None
+    query = query / query_norm
+    bank = bank[valid] / bank_norms[valid, None]
+    similarities = np.clip(bank @ query, -1.0, 1.0)
+    if entity_reliability is None:
+        reliability = np.ones(len(bank), dtype=np.float64)
+    else:
+        reliability = np.asarray(entity_reliability, dtype=np.float64).reshape(-1)
+        reliability = reliability[valid]
+        reliability = np.where(
+            np.isfinite(reliability), np.clip(reliability, 0.0, 1.0), 0.0
+        )
+        if float(reliability.sum()) <= 1e-12:
+            reliability = np.ones(len(bank), dtype=np.float64)
+    alpha = reliability / reliability.sum()
+    logits = np.log(np.maximum(alpha, 1e-12)) + similarities / temperature
+    maximum = float(np.max(logits))
+    soft_similarity = temperature * (
+        maximum + float(np.log(np.exp(logits - maximum).sum()))
+    )
+    cost = 0.5 * (1.0 - float(np.clip(soft_similarity, -1.0, 1.0)))
+    return cost, float(np.mean(np.clip(reliability, 0.0, 1.0)))
+
+
 def build_pairwise_cost_matrix(
     proposals: Sequence[LiftedProposal],
     entities: Sequence[Entity],
@@ -264,6 +315,10 @@ def build_pairwise_cost_matrix(
         "geometry": np.full(shape, np.nan, dtype=np.float64),
         "colour": np.full(shape, np.nan, dtype=np.float64),
         "descriptor": np.full(shape, np.nan, dtype=np.float64),
+        "appearance": np.full(shape, np.nan, dtype=np.float64),
+        "appearance_reliability": np.full(
+            shape, np.nan, dtype=np.float64
+        ),
         "temporal": np.full(shape, np.nan, dtype=np.float64),
     }
 
@@ -348,6 +403,38 @@ def build_pairwise_cost_matrix(
                     descriptor_cost
                 )
                 cue_values.append((config.descriptor_weight, descriptor_cost))
+
+            appearance = _appearance_cost(
+                proposal.appearance_descriptor,
+                entity.appearance_descriptor_bank,
+                entity.appearance_reliability,
+                config.appearance_temperature,
+            )
+            if appearance is not None:
+                appearance_cost, entity_reliability = appearance
+                proposal_reliability = (
+                    1.0
+                    if proposal.appearance_reliability is None
+                    else float(proposal.appearance_reliability)
+                )
+                pair_reliability = float(
+                    np.sqrt(
+                        np.clip(proposal_reliability, 0.0, 1.0)
+                        * np.clip(entity_reliability, 0.0, 1.0)
+                    )
+                )
+                components["appearance"][proposal_index, entity_index] = (
+                    appearance_cost
+                )
+                components["appearance_reliability"][
+                    proposal_index, entity_index
+                ] = pair_reliability
+                cue_values.append(
+                    (
+                        config.appearance_weight * pair_reliability,
+                        appearance_cost,
+                    )
+                )
 
             temporal_hint = temporal_hints.get(proposal.proposal_id)
             if (

@@ -127,11 +127,14 @@ bash scripts/run_fact3r_video.sh \
 ```
 
 When camera intrinsics are known, add `--calib config/my_camera.yaml`. The runner
-executes and validates five resumable stages: MASt3R-SLAM keyframe export,
-complete-frame official SAM2 proposals, re-anchored SAM2 tracklets,
-visibility-conditioned delayed-commitment UOT mapping and SigLIP observation
-indexing. A stage with a completed manifest is reused on restart. The final
-bundle is:
+executes and validates six resumable stages: MASt3R-SLAM keyframe export,
+complete-frame official SAM2 proposals, re-anchored SAM2 tracklets, pre-UOT
+SigLIP2 mask encoding, appearance-aware visibility-conditioned
+delayed-commitment UOT mapping, and attachment of the final entity IDs to those
+same embeddings. A stage with a completed manifest is reused on restart. If an
+older geometry-only map is found, the association and identity-attachment stages
+are rebuilt while the expensive SLAM, SAM2 and SigLIP2 outputs are retained. The
+final bundle is:
 
 ```text
 logs/fact3r_video/room-walk/map.json
@@ -172,6 +175,57 @@ per entity. Per-entity verdicts remain cached, invalid/missing structured output
 fails closed, and each query receives an HTML evidence gallery plus machine-
 readable `results.json`.
 
+### Appearance-aware UOT and automatic hard negatives
+
+The current mapper can use the same SigLIP2 mask embeddings both before UOT for
+identity association and after UOT for semantic recollection. Each observation
+receives a reliability score from SAM2 confidence, mask-to-3D retention, SAM2
+track IoU and crop resolution. Appearance is a reliability-scaled soft cue inside
+the existing 3D candidate gate; it cannot connect spatially impossible objects.
+
+Each entity retains at most eight diverse appearance views. A matched view enters
+that bank only when appearance reliability, UOT retained mass, UOT conditional
+probability and optional track IoU pass stricter update gates. Every rejected
+memory update has an explicit reason in the mapping manifest.
+
+At query time, the three visually nearest competing map entities become automatic
+hard negatives. This removes the need to manually provide object-specific
+confounders for every query. The fast path still requires support from multiple
+views, while Qwen3-VL remains an optional final verifier for ambiguous small
+objects.
+
+The complete notation, objective, generalized Sinkhorn updates, memory rules,
+query equations, defaults, rationale and ablation plan are in
+[`FACT3R_METHODS.tex`](FACT3R_METHODS.tex).
+
+For an already exported HM3D scene, run the new stages explicitly:
+
+```bash
+# Encode every mask once, before association.
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/build_siglip_observation_index.py \
+  --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --proposals logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --output logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/SCENE_NAME \
+  --device 0
+
+# Build appearance-aware persistent entities.
+conda run -n SAM2 python3 \
+  fact3r-map/scripts/run_visibility_residual_transport.py \
+  --keyframes logs/hm3d/calib_fact3r/fact3r_keyframes/SCENE_NAME \
+  --proposals logs/hm3d/calib_fact3r/fact3r_sam2/SCENE_NAME \
+  --tracklets logs/hm3d/calib_fact3r/fact3r_sam2_tracklets/SCENE_NAME \
+  --appearance-index logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/SCENE_NAME \
+  --output logs/hm3d/calib_fact3r/fact3r_appearance_uot/SCENE_NAME \
+  --delayed-commitment
+
+# Reuse the embeddings and attach final persistent identities.
+conda run -n SAM2 python3 fact3r-map/scripts/attach_siglip_mapping.py \
+  --index logs/hm3d/calib_fact3r/fact3r_siglip_pre_uot/SCENE_NAME \
+  --mapping logs/hm3d/calib_fact3r/fact3r_appearance_uot/SCENE_NAME \
+  --output logs/hm3d/calib_fact3r/fact3r_siglip_observations/SCENE_NAME
+```
+
 ### 6.1 Navigation layer
 
 The BEV is used for geometry and planning, not as the primary semantic memory.
@@ -205,6 +259,8 @@ Entity:
 
     mast3r_descriptor_bank
     descriptor_confidence
+    appearance_descriptor_bank  # up to 8 diverse SigLIP2 views
+    appearance_reliability      # one reliability per stored view
     observation_count
     observed_view_directions
     best_observation_pose

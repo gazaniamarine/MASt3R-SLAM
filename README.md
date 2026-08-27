@@ -94,8 +94,9 @@ python main.py --dataset <path/to/video>.mp4 --config config/base.yaml --calib c
 python main.py --dataset <path/to/folder> --config config/base.yaml --calib config/intrinsics.yaml
 ```
 
-To continue from a finite video through Fact3R proposals, persistent UOT
-entities and a searchable observation map, use the resumable end-to-end runner:
+To continue from a finite video through Fact3R proposals, reliability-gated
+SigLIP2 appearance memory, persistent UOT entities and a searchable observation
+map, use the resumable end-to-end runner:
 
 ```bash
 bash scripts/run_fact3r_video.sh \
@@ -107,7 +108,8 @@ bash scripts/run_fact3r_video.sh \
 
 The completed bundle is written to `logs/fact3r_video/my-map/map.json`; see
 [`fact3r-map/README.md`](fact3r-map/README.md) for fast and Qwen-verified query
-commands.
+commands, and [`fact3r-map/FACT3R_METHODS.tex`](fact3r-map/FACT3R_METHODS.tex)
+for the complete mathematical specification.
 
 ## Downloading Dataset
 ### TUM-RGBD Dataset

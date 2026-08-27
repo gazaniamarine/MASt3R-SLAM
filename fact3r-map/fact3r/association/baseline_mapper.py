@@ -15,6 +15,31 @@ from fact3r.proposals.lift_to_3d import LiftedProposal
 
 
 @dataclass(frozen=True, slots=True)
+class AppearanceMemoryConfig:
+    """Bounded, view-diverse appearance memory and update gates."""
+
+    max_views: int = 8
+    max_redundant_similarity: float = 0.95
+    min_update_reliability: float = 0.45
+    min_conditional_probability: float = 0.70
+    min_retained_ratio: float = 0.50
+    min_track_iou: float = 0.60
+
+    def __post_init__(self) -> None:
+        if self.max_views <= 0:
+            raise ValueError("max_views must be positive")
+        probabilities = (
+            self.max_redundant_similarity,
+            self.min_update_reliability,
+            self.min_conditional_probability,
+            self.min_retained_ratio,
+            self.min_track_iou,
+        )
+        if any(not 0.0 <= value <= 1.0 for value in probabilities):
+            raise ValueError("appearance memory thresholds must be in [0, 1]")
+
+
+@dataclass(frozen=True, slots=True)
 class HungarianMapConfig:
     """State-update parameters intentionally limited to the hard baseline."""
 
@@ -23,6 +48,9 @@ class HungarianMapConfig:
     entity_voxel_size_m: float = 0.04
     max_entity_points: int = 4096
     max_descriptor_samples: int = 512
+    appearance_memory: AppearanceMemoryConfig = field(
+        default_factory=AppearanceMemoryConfig
+    )
 
     def __post_init__(self) -> None:
         if self.max_match_cost < 0.0 or not np.isfinite(self.max_match_cost):
@@ -93,6 +121,60 @@ def _proposal_descriptor_samples(
         descriptors = descriptors[indices]
         confidence = confidence[indices]
     return np.ascontiguousarray(descriptors), np.ascontiguousarray(confidence)
+
+
+def _append_appearance_view(
+    entity: Entity,
+    proposal: LiftedProposal,
+    config: AppearanceMemoryConfig,
+) -> bool:
+    """Insert or quality-replace one view without averaging viewpoints away."""
+
+    if proposal.appearance_descriptor is None:
+        return False
+    descriptor = np.asarray(
+        proposal.appearance_descriptor, dtype=np.float32
+    ).reshape(1, -1)
+    reliability = float(
+        1.0
+        if proposal.appearance_reliability is None
+        else proposal.appearance_reliability
+    )
+    if entity.appearance_descriptor_bank is None:
+        entity.appearance_descriptor_bank = descriptor
+        entity.appearance_reliability = np.asarray(
+            [reliability], dtype=np.float32
+        )
+        return True
+    bank = np.asarray(entity.appearance_descriptor_bank, dtype=np.float32)
+    if bank.shape[1] != descriptor.shape[1]:
+        return False
+    stored_reliability = (
+        np.ones(len(bank), dtype=np.float32)
+        if entity.appearance_reliability is None
+        else np.asarray(entity.appearance_reliability, dtype=np.float32)
+    )
+    similarities = np.clip(bank @ descriptor[0], -1.0, 1.0)
+    most_similar = int(np.argmax(similarities))
+    if similarities[most_similar] >= config.max_redundant_similarity:
+        if reliability <= float(stored_reliability[most_similar]):
+            return False
+        bank[most_similar] = descriptor[0]
+        stored_reliability[most_similar] = reliability
+    elif len(bank) < config.max_views:
+        bank = np.concatenate((bank, descriptor), axis=0)
+        stored_reliability = np.concatenate(
+            (stored_reliability, np.asarray([reliability], dtype=np.float32))
+        )
+    else:
+        weakest = int(np.argmin(stored_reliability))
+        if reliability <= float(stored_reliability[weakest]):
+            return False
+        bank[weakest] = descriptor[0]
+        stored_reliability[weakest] = reliability
+    entity.appearance_descriptor_bank = np.ascontiguousarray(bank)
+    entity.appearance_reliability = np.ascontiguousarray(stored_reliability)
+    return True
 
 
 class HungarianEntityMapper:
@@ -178,6 +260,23 @@ class HungarianEntityMapper:
             colour_statistics={"mean_rgb": _proposal_colour(proposal)},
             mast3r_descriptor_bank=descriptors,
             descriptor_confidence=confidence,
+            appearance_descriptor_bank=(
+                None
+                if proposal.appearance_descriptor is None
+                else proposal.appearance_descriptor[None, :]
+            ),
+            appearance_reliability=(
+                None
+                if proposal.appearance_descriptor is None
+                else np.asarray(
+                    [
+                        1.0
+                        if proposal.appearance_reliability is None
+                        else proposal.appearance_reliability
+                    ],
+                    dtype=np.float32,
+                )
+            ),
             observation_count=1,
             first_seen_timestamp=timestamp,
             last_seen_timestamp=timestamp,
@@ -192,7 +291,9 @@ class HungarianEntityMapper:
         entity: Entity,
         proposal: LiftedProposal,
         timestamp: float | str | None,
-    ) -> None:
+        *,
+        update_appearance: bool = True,
+    ) -> bool:
         combined_points = np.concatenate(
             (entity.surfel_or_voxel_geometry, proposal.points_world), axis=0
         )
@@ -247,5 +348,12 @@ class HungarianEntityMapper:
                     self.config.max_descriptor_samples,
                 ).astype(np.float32)
 
+        appearance_updated = False
+        if update_appearance:
+            appearance_updated = _append_appearance_view(
+                entity, proposal, self.config.appearance_memory
+            )
+
         entity.observation_count += 1
         entity.last_seen_timestamp = timestamp
+        return appearance_updated

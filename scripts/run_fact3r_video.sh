@@ -120,6 +120,7 @@ keyframes="$output_root/fact3r_keyframes/$sequence_name"
 proposals="$output_root/fact3r_sam2/$sequence_name"
 tracklets="$output_root/fact3r_sam2_tracklets/$sequence_name"
 mapping="$output_root/fact3r_delayed_commitment_uot/$sequence_name"
+appearance_index="$output_root/fact3r_siglip_pre_uot/$sequence_name"
 observations="$output_root/fact3r_siglip_observations/$sequence_name"
 
 slam_python=(python3)
@@ -131,9 +132,9 @@ mapping_python=(conda run -n "$sam2_environment" python3)
 cd "$repository_root"
 
 if [[ -f "$keyframes/manifest.json" ]]; then
-    echo "[1/5] Reusing MASt3R-SLAM keyframes: $keyframes"
+    echo "[1/6] Reusing MASt3R-SLAM keyframes: $keyframes"
 else
-    echo "[1/5] Running MASt3R-SLAM on $video"
+    echo "[1/6] Running MASt3R-SLAM on $video"
     slam_command=(
         "${slam_python[@]}" main.py
         --dataset "$video"
@@ -153,9 +154,9 @@ if [[ ! -f "$keyframes/manifest.json" ]]; then
 fi
 
 if [[ -f "$proposals/manifest.json" ]]; then
-    echo "[2/5] Reusing official SAM2 proposals: $proposals"
+    echo "[2/6] Reusing official SAM2 proposals: $proposals"
 else
-    echo "[2/5] Generating complete-frame SAM2 proposals"
+    echo "[2/6] Generating complete-frame SAM2 proposals"
     "${mapping_python[@]}" fact3r-map/scripts/build_sam2_proposals.py \
         --keyframes "$keyframes" \
         --output "$proposals" \
@@ -166,9 +167,9 @@ else
 fi
 
 if [[ -f "$tracklets/manifest.json" ]]; then
-    echo "[3/5] Reusing SAM2 short-term tracklets: $tracklets"
+    echo "[3/6] Reusing SAM2 short-term tracklets: $tracklets"
 else
-    echo "[3/5] Building re-anchored SAM2 tracklets"
+    echo "[3/6] Building re-anchored SAM2 tracklets"
     tracklet_command=(
         "${mapping_python[@]}" fact3r-map/scripts/build_sam2_tracklets.py
         --keyframes "$keyframes"
@@ -183,31 +184,53 @@ else
     "${tracklet_command[@]}"
 fi
 
-if [[ -f "$mapping/manifest.json" ]]; then
-    echo "[4/5] Reusing delayed-commitment UOT entity map: $mapping"
+if [[ -f "$appearance_index/manifest.json" ]]; then
+    echo "[4/6] Reusing pre-UOT SigLIP appearance index: $appearance_index"
 else
-    echo "[4/5] Building visibility-conditioned persistent entity map"
+    echo "[4/6] Encoding pre-UOT SigLIP appearance memory"
+    "${mapping_python[@]}" \
+        fact3r-map/scripts/build_siglip_observation_index.py \
+        --keyframes "$keyframes" \
+        --proposals "$proposals" \
+        --output "$appearance_index" \
+        --device "$device" \
+        --batch-size "$siglip_batch_size"
+fi
+
+mapping_has_appearance=false
+if [[ -f "$mapping/manifest.json" ]] && \
+    grep -Fq "\"source_appearance_index\": \"$appearance_index/manifest.json\"" \
+        "$mapping/manifest.json"; then
+    mapping_has_appearance=true
+fi
+if [[ "$mapping_has_appearance" == true ]]; then
+    echo "[5/6] Reusing delayed-commitment UOT entity map: $mapping"
+else
+    if [[ -f "$mapping/manifest.json" ]]; then
+        echo "[5/6] Existing map predates appearance memory; rebuilding it"
+    else
+        echo "[5/6] Building appearance-aware visibility-conditioned entity map"
+    fi
     "${mapping_python[@]}" \
         fact3r-map/scripts/run_visibility_residual_transport.py \
         --keyframes "$keyframes" \
         --proposals "$proposals" \
         --tracklets "$tracklets" \
+        --appearance-index "$appearance_index" \
         --output "$mapping" \
         --delayed-commitment
 fi
 
-if [[ -f "$observations/manifest.json" ]]; then
-    echo "[5/5] Reusing SigLIP observation memory: $observations"
+if [[ -f "$observations/manifest.json" && \
+    ! "$mapping/manifest.json" -nt "$observations/manifest.json" ]]; then
+    echo "[6/6] Reusing mapped SigLIP observation memory: $observations"
 else
-    echo "[5/5] Encoding persistent mask observations with SigLIP"
+    echo "[6/6] Attaching persistent identities without re-encoding images"
     "${mapping_python[@]}" \
-        fact3r-map/scripts/build_siglip_observation_index.py \
-        --keyframes "$keyframes" \
-        --proposals "$proposals" \
+        fact3r-map/scripts/attach_siglip_mapping.py \
+        --index "$appearance_index" \
         --mapping "$mapping" \
-        --output "$observations" \
-        --device "$device" \
-        --batch-size "$siglip_batch_size"
+        --output "$observations"
 fi
 
 finalize_command=(

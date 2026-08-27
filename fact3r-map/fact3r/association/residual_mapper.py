@@ -92,6 +92,18 @@ class BirthCommitmentDecision:
     blocking_reasons: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class AppearanceMemoryDecision:
+    proposal_id: str
+    entity_id: str
+    updated: bool
+    proposal_reliability: float | None
+    conditional_probability: float
+    retained_ratio: float
+    track_iou: float | None
+    blocking_reasons: tuple[str, ...]
+
+
 @dataclass(slots=True)
 class _PendingBirthTrack:
     track_id: str
@@ -195,6 +207,7 @@ class ResidualTransportFrameMappingResult:
     expired_pending_track_ids: tuple[str, ...]
     resolved_pending_track_ids: tuple[str, ...]
     pending_track_count_after: int
+    appearance_memory_decisions: tuple[AppearanceMemoryDecision, ...]
 
 
 class VisibilityResidualEntityMapper(HungarianEntityMapper):
@@ -295,13 +308,53 @@ class VisibilityResidualEntityMapper(HungarianEntityMapper):
         )
 
         resolved_pending: list[str] = []
+        appearance_decisions: list[AppearanceMemoryDecision] = []
         for match in assignment.matches:
-            self._update_entity(
-                self._entities[match.entity_index],
-                proposals[match.proposal_index],
-                keyframe.timestamp,
-            )
+            proposal = proposals[match.proposal_index]
             observation = observations.get(match.proposal_id)
+            track_iou = (
+                None if observation is None else observation.link_iou
+            )
+            memory_config = self.config.appearance_memory
+            blocking: list[str] = []
+            if proposal.appearance_descriptor is None:
+                blocking.append("appearance_unavailable")
+            if (
+                proposal.appearance_reliability is not None
+                and proposal.appearance_reliability
+                < memory_config.min_update_reliability
+            ):
+                blocking.append("low_appearance_reliability")
+            if (
+                match.conditional_probability
+                < memory_config.min_conditional_probability
+            ):
+                blocking.append("low_conditional_probability")
+            if match.retained_ratio < memory_config.min_retained_ratio:
+                blocking.append("low_retained_ratio")
+            if track_iou is not None and track_iou < memory_config.min_track_iou:
+                blocking.append("weak_temporal_link")
+            appearance_updated = self._update_entity(
+                self._entities[match.entity_index],
+                proposal,
+                keyframe.timestamp,
+                update_appearance=not blocking,
+            )
+            if not blocking and proposal.appearance_descriptor is not None:
+                if not appearance_updated:
+                    blocking.append("redundant_or_lower_quality_view")
+            appearance_decisions.append(
+                AppearanceMemoryDecision(
+                    proposal_id=match.proposal_id,
+                    entity_id=match.entity_id,
+                    updated=appearance_updated,
+                    proposal_reliability=proposal.appearance_reliability,
+                    conditional_probability=match.conditional_probability,
+                    retained_ratio=match.retained_ratio,
+                    track_iou=track_iou,
+                    blocking_reasons=tuple(blocking),
+                )
+            )
             if observation is not None:
                 self._track_entity_ids[observation.track_id] = match.entity_id
                 if self._pending_births.pop(observation.track_id, None) is not None:
@@ -443,4 +496,5 @@ class VisibilityResidualEntityMapper(HungarianEntityMapper):
             expired_pending_track_ids=tuple(sorted(expired_pending)),
             resolved_pending_track_ids=tuple(sorted(set(resolved_pending))),
             pending_track_count_after=len(self._pending_births),
+            appearance_memory_decisions=tuple(appearance_decisions),
         )

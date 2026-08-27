@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from fact3r.association import (  # noqa: E402
+    AppearanceMemoryConfig,
     BirthCommitmentStatus,
     DelayedCommitmentConfig,
     HungarianMapConfig,
@@ -34,6 +35,10 @@ from fact3r.integrations.mast3r_slam import (  # noqa: E402
 from fact3r.proposals.storage import (  # noqa: E402
     iter_saved_proposal_frames,
     load_proposal_run_manifest,
+)
+from fact3r.semantics.appearance_memory import (  # noqa: E402
+    AppearanceReliabilityConfig,
+    load_siglip_appearance_index,
 )
 
 
@@ -106,6 +111,12 @@ def _save_entities(output: Path, entities) -> list[dict[str, object]]:
             payload["mast3r_descriptor_bank"] = entity.mast3r_descriptor_bank
         if entity.descriptor_confidence is not None:
             payload["descriptor_confidence"] = entity.descriptor_confidence
+        if entity.appearance_descriptor_bank is not None:
+            payload["appearance_descriptor_bank"] = (
+                entity.appearance_descriptor_bank
+            )
+        if entity.appearance_reliability is not None:
+            payload["appearance_reliability"] = entity.appearance_reliability
         np.savez_compressed(entity_directory / filename, **payload)
         colour = entity.colour_statistics.get(
             "mean_rgb", entity.colour_statistics.get("median_rgb")
@@ -119,6 +130,16 @@ def _save_entities(output: Path, entities) -> list[dict[str, object]]:
                 "bounding_box_xyz": entity.bounding_box_xyz.tolist(),
                 "mean_rgb": None if colour is None else np.asarray(colour).tolist(),
                 "observation_count": entity.observation_count,
+                "appearance_view_count": (
+                    0
+                    if entity.appearance_descriptor_bank is None
+                    else len(entity.appearance_descriptor_bank)
+                ),
+                "mean_appearance_reliability": (
+                    None
+                    if entity.appearance_reliability is None
+                    else float(np.mean(entity.appearance_reliability))
+                ),
                 "first_seen_timestamp": entity.first_seen_timestamp,
                 "last_seen_timestamp": entity.last_seen_timestamp,
             }
@@ -131,6 +152,11 @@ def main() -> None:
     parser.add_argument("--keyframes", type=Path, required=True)
     parser.add_argument("--proposals", type=Path, required=True)
     parser.add_argument("--tracklets", type=Path)
+    parser.add_argument(
+        "--appearance-index",
+        type=Path,
+        help="pre-UOT SigLIP observation index built without --mapping",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--max-match-cost", type=float, default=0.65)
@@ -139,6 +165,10 @@ def main() -> None:
     parser.add_argument("--geometry-match-distance", type=float, default=0.08)
     parser.add_argument("--max-geometry-points", type=int, default=256)
     parser.add_argument("--temporal-weight", type=float, default=0.25)
+    parser.add_argument(
+        "--appearance-weight", type=float, default=0.25
+    )
+    parser.add_argument("--appearance-temperature", type=float, default=0.07)
     parser.add_argument("--entropy-temperature", type=float, default=0.05)
     parser.add_argument("--max-iterations", type=int, default=2000)
     parser.add_argument("--fixed-point-tolerance", type=float, default=1e-7)
@@ -155,6 +185,28 @@ def main() -> None:
     parser.add_argument("--unknown-depth-visibility", type=float, default=0.0)
     parser.add_argument("--entity-voxel-size", type=float, default=0.04)
     parser.add_argument("--max-entity-points", type=int, default=4096)
+    parser.add_argument(
+        "--appearance-max-views", type=int, default=8
+    )
+    parser.add_argument(
+        "--appearance-max-redundant-similarity", type=float, default=0.95
+    )
+    parser.add_argument(
+        "--appearance-min-update-reliability", type=float, default=0.45
+    )
+    parser.add_argument(
+        "--appearance-min-conditional-probability", type=float, default=0.70
+    )
+    parser.add_argument(
+        "--appearance-min-retained-ratio", type=float, default=0.50
+    )
+    parser.add_argument("--appearance-min-track-iou", type=float, default=0.60)
+    parser.add_argument(
+        "--appearance-reference-mask-area", type=float, default=4096.0
+    )
+    parser.add_argument(
+        "--appearance-missing-track-quality", type=float, default=0.75
+    )
     parser.add_argument(
         "--delayed-commitment",
         action="store_true",
@@ -183,13 +235,32 @@ def main() -> None:
         bounding_box_padding_m=args.bbox_padding,
         geometry_match_distance_m=args.geometry_match_distance,
         max_geometry_points=args.max_geometry_points,
+        appearance_weight=args.appearance_weight,
+        appearance_temperature=args.appearance_temperature,
         temporal_weight=args.temporal_weight,
+    )
+    appearance_memory_config = AppearanceMemoryConfig(
+        max_views=args.appearance_max_views,
+        max_redundant_similarity=(
+            args.appearance_max_redundant_similarity
+        ),
+        min_update_reliability=args.appearance_min_update_reliability,
+        min_conditional_probability=(
+            args.appearance_min_conditional_probability
+        ),
+        min_retained_ratio=args.appearance_min_retained_ratio,
+        min_track_iou=args.appearance_min_track_iou,
     )
     map_config = HungarianMapConfig(
         pairwise_cost=pairwise_config,
         max_match_cost=args.max_match_cost,
         entity_voxel_size_m=args.entity_voxel_size,
         max_entity_points=args.max_entity_points,
+        appearance_memory=appearance_memory_config,
+    )
+    appearance_reliability_config = AppearanceReliabilityConfig(
+        reference_mask_area=args.appearance_reference_mask_area,
+        missing_track_quality=args.appearance_missing_track_quality,
     )
     transport_config = ResidualTransportConfig(
         entropy_temperature=args.entropy_temperature,
@@ -231,6 +302,19 @@ def main() -> None:
     tracklet_run = (
         None if args.tracklets is None else load_tracklet_run(args.tracklets)
     )
+    appearance_index = (
+        None
+        if args.appearance_index is None
+        else load_siglip_appearance_index(args.appearance_index)
+    )
+    if appearance_index is not None:
+        indexed_proposals = Path(
+            str(appearance_index.manifest["source_proposals"])
+        ).resolve()
+        if indexed_proposals != args.proposals.resolve():
+            raise ValueError(
+                "appearance index was built from a different proposal run"
+            )
     output = args.output or _default_output(
         args.proposals, delayed_commitment=args.delayed_commitment
     )
@@ -256,6 +340,8 @@ def main() -> None:
     expired_pending_total = 0
     resolved_pending_total = 0
     peak_pending_track_count = 0
+    appearance_memory_update_total = 0
+    appearance_memory_rejection_totals: dict[str, int] = {}
     sentinel = object()
 
     paired_frames = zip_longest(
@@ -273,7 +359,6 @@ def main() -> None:
                 f"frame mismatch: proposals={frame.frame_id}, "
                 f"keyframe={keyframe.frame_id}"
             )
-
         observations = (
             ()
             if tracklet_run is None
@@ -282,6 +367,13 @@ def main() -> None:
         observations_by_proposal = {
             observation.proposal_id: observation for observation in observations
         }
+        appearance_evidence = {}
+        if appearance_index is not None:
+            frame, appearance_evidence = appearance_index.enrich_frame(
+                frame,
+                observations_by_proposal,
+                appearance_reliability_config,
+            )
         temporal_hints: dict[str, TemporalEntityHint] = {}
         for proposal in frame.proposals:
             observation = observations_by_proposal.get(proposal.proposal_id)
@@ -364,11 +456,24 @@ def main() -> None:
         peak_pending_track_count = max(
             peak_pending_track_count, result.pending_track_count_after
         )
+        appearance_memory_update_total += sum(
+            decision.updated
+            for decision in result.appearance_memory_decisions
+        )
+        for decision in result.appearance_memory_decisions:
+            for reason in decision.blocking_reasons:
+                appearance_memory_rejection_totals[reason] = (
+                    appearance_memory_rejection_totals.get(reason, 0) + 1
+                )
 
         evidence_file = _save_transport_evidence(output, result)
         decisions_by_proposal = {
             decision.proposal_id: decision
             for decision in result.birth_decisions
+        }
+        appearance_decisions_by_proposal = {
+            decision.proposal_id: decision
+            for decision in result.appearance_memory_decisions
         }
         unmatched_entries = [
             {
@@ -434,6 +539,11 @@ def main() -> None:
                         unmatched.proposal_id
                     ].blocking_reasons
                 ),
+                "appearance_evidence": (
+                    None
+                    if unmatched.proposal_id not in appearance_evidence
+                    else asdict(appearance_evidence[unmatched.proposal_id])
+                ),
             }
             for unmatched in assignment.unmatched_proposals
         ]
@@ -469,6 +579,14 @@ def main() -> None:
                             else temporal_hints[match.proposal_id].entity_id
                         ),
                         "temporal_hint_honored": match.proposal_id in honored_hints,
+                        "appearance_evidence": (
+                            None
+                            if match.proposal_id not in appearance_evidence
+                            else asdict(appearance_evidence[match.proposal_id])
+                        ),
+                        "appearance_memory": asdict(
+                            appearance_decisions_by_proposal[match.proposal_id]
+                        ),
                     }
                     for match in assignment.matches
                 ],
@@ -489,6 +607,10 @@ def main() -> None:
                 ],
                 "temporal_hint_count": len(temporal_hints),
                 "temporal_hint_honored_count": len(honored_hints),
+                "appearance_memory_update_count": sum(
+                    decision.updated
+                    for decision in result.appearance_memory_decisions
+                ),
             }
         )
         reason_summary = ",".join(
@@ -510,6 +632,8 @@ def main() -> None:
             f"iterations={assignment.iterations},"
             f"forbidden_mass={assignment.forbidden_mass:.1e}] "
             f"tracklet_hints={len(temporal_hints)} honored={len(honored_hints)}"
+            " appearance_updates="
+            f"{sum(decision.updated for decision in result.appearance_memory_decisions)}"
         )
         previous_proposal_entities = current_proposal_entities
 
@@ -522,9 +646,17 @@ def main() -> None:
         "source_tracklets": (
             None if args.tracklets is None else str(args.tracklets.resolve())
         ),
+        "source_appearance_index": (
+            None
+            if appearance_index is None
+            else str(appearance_index.manifest_path.resolve())
+        ),
         "source_model": proposal_run.get("model"),
         "pairwise_cost_config": asdict(pairwise_config),
         "map_config": asdict(map_config),
+        "appearance_reliability_config": asdict(
+            appearance_reliability_config
+        ),
         "transport_config": asdict(transport_config),
         "visibility_config": asdict(visibility_config),
         "delayed_commitment_config": (
@@ -555,6 +687,10 @@ def main() -> None:
         "expired_pending_track_total": expired_pending_total,
         "resolved_pending_track_total": resolved_pending_total,
         "peak_pending_track_count": peak_pending_track_count,
+        "appearance_memory_update_total": appearance_memory_update_total,
+        "appearance_memory_rejection_totals": dict(
+            sorted(appearance_memory_rejection_totals.items())
+        ),
         "final_pending_tracks": [
             asdict(summary) for summary in mapper.pending_births
         ],

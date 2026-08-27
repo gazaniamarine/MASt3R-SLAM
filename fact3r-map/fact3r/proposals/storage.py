@@ -47,6 +47,12 @@ def save_frame_proposals(
             payload["mast3r_descriptors"] = lifted.mast3r_descriptors
         if lifted.descriptor_confidence is not None:
             payload["descriptor_confidence"] = lifted.descriptor_confidence
+        if lifted.appearance_descriptor is not None:
+            payload["appearance_descriptor"] = lifted.appearance_descriptor
+        if lifted.appearance_reliability is not None:
+            payload["appearance_reliability"] = np.asarray(
+                lifted.appearance_reliability, dtype=np.float32
+            )
         np.savez_compressed(frame_directory / filename, **payload)
         entries.append(
             {
@@ -131,6 +137,16 @@ def iter_saved_proposal_frames(
                     if "descriptor_confidence" in payload.files
                     else None
                 )
+                appearance_descriptor = (
+                    np.array(payload["appearance_descriptor"], copy=True)
+                    if "appearance_descriptor" in payload.files
+                    else None
+                )
+                appearance_reliability = (
+                    float(payload["appearance_reliability"])
+                    if "appearance_reliability" in payload.files
+                    else None
+                )
                 proposals.append(
                     LiftedProposal(
                         proposal_id=str(entry["proposal_id"]),
@@ -145,6 +161,8 @@ def iter_saved_proposal_frames(
                         mast3r_descriptors=descriptors,
                         descriptor_confidence=descriptor_confidence,
                         source_mask_area=int(entry["mask_area"]),
+                        appearance_descriptor=appearance_descriptor,
+                        appearance_reliability=appearance_reliability,
                     )
                 )
         expected_count = int(frame_manifest["proposal_count"])

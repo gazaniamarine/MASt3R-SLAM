@@ -474,6 +474,77 @@ def load_observation_index(
     return manifest_path, manifest, embeddings
 
 
+def attach_mapping_to_observation_index(
+    *,
+    index: str | Path,
+    mapping: str | Path,
+    output: str | Path,
+) -> Path:
+    """Reuse pre-UOT embeddings and attach final entity/track assignments."""
+
+    source_path, source_manifest, embeddings = load_observation_index(index)
+    if source_manifest.get("source_mapping") is not None:
+        raise ValueError(
+            "mapping attachment requires a pre-UOT index built without --mapping"
+        )
+    mapping_path = _manifest_path(mapping)
+    mapping_manifest = json.loads(mapping_path.read_text(encoding="utf-8"))
+    indexed_proposals = Path(str(source_manifest["source_proposals"])).resolve()
+    mapped_proposals = mapping_manifest.get("source_proposals")
+    if (
+        mapped_proposals is not None
+        and Path(str(mapped_proposals)).resolve() != indexed_proposals
+    ):
+        raise ValueError("index and mapping were built from different proposals")
+    assignments = load_mapping_assignments(mapping)
+    observations: list[dict[str, object]] = []
+    for source in source_manifest["observations"]:
+        observation = dict(source)
+        key = (int(observation["frame_id"]), str(observation["proposal_id"]))
+        assignment = assignments.get(
+            key, MappingAssignment(None, None, "unassigned")
+        )
+        observation["entity_id"] = assignment.entity_id
+        observation["track_id"] = assignment.track_id
+        observation["assignment_status"] = assignment.status
+        observation["association_confidence"] = (
+            assignment.association_confidence
+        )
+        observation["group_id"] = (
+            assignment.entity_id
+            or assignment.track_id
+            or f"observation-{int(observation['index']):06d}"
+        )
+        observations.append(observation)
+
+    output_directory = Path(output)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    np.save(output_directory / "embeddings.npy", embeddings)
+    manifest = dict(source_manifest)
+    manifest.update(
+        {
+            "source_mapping": str(mapping_path.resolve()),
+            "embedding_file": "embeddings.npy",
+            "assigned_observation_count": sum(
+                observation["entity_id"] is not None
+                for observation in observations
+            ),
+            "reused_embedding_source": str(source_path.resolve()),
+            "observations": observations,
+        }
+    )
+    timing = dict(source_manifest.get("timing", {}))
+    timing["reused_pre_uot_embeddings"] = True
+    timing["additional_image_encoding_seconds"] = 0.0
+    manifest["timing"] = timing
+    manifest_path = output_directory / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
 def rank_observation_groups(
     embeddings: FloatArray,
     observations: Sequence[Mapping[str, object]],
@@ -535,6 +606,68 @@ def default_negative_prompts() -> tuple[str, ...]:
     )
 
 
+def map_derived_hard_negative_scores(
+    embeddings: FloatArray,
+    observations: Sequence[Mapping[str, object]],
+    query_embeddings: FloatArray,
+    *,
+    neighbors: int = 3,
+    confirmed_only: bool = True,
+) -> tuple[NDArray[np.float32], dict[str, list[dict[str, object]]]]:
+    """Use visually nearest competing map entities as query-time negatives."""
+
+    if neighbors <= 0:
+        raise ValueError("neighbors must be positive")
+    vectors = _normalise_rows(embeddings)
+    queries = _normalise_rows(query_embeddings)
+    if vectors.shape[1] != queries.shape[1]:
+        raise ValueError("query and observation embedding dimensions differ")
+    query = _normalise_rows(np.mean(queries, axis=0, keepdims=True))[0]
+    grouped: dict[str, list[int]] = defaultdict(list)
+    for index, observation in enumerate(observations):
+        entity_id = observation.get("entity_id")
+        if confirmed_only and entity_id is None:
+            continue
+        group_id = entity_id or observation.get("track_id") or observation["group_id"]
+        grouped[str(group_id)].append(index)
+    scores = np.full(len(observations), -1.0, dtype=np.float32)
+    diagnostics: dict[str, list[dict[str, object]]] = {
+        group_id: [] for group_id in grouped
+    }
+    if len(grouped) < 2:
+        return scores, diagnostics
+    group_ids = sorted(grouped)
+    prototypes = _normalise_rows(
+        np.stack(
+            [np.mean(vectors[grouped[group_id]], axis=0) for group_id in group_ids]
+        )
+    )
+    prototype_similarity = prototypes @ prototypes.T
+    query_similarity = prototypes @ query
+    for group_index, group_id in enumerate(group_ids):
+        order = np.argsort(-prototype_similarity[group_index])
+        competitor_indices = [
+            int(index)
+            for index in order
+            if int(index) != group_index
+        ][:neighbors]
+        if not competitor_indices:
+            continue
+        strongest = float(np.max(query_similarity[competitor_indices]))
+        scores[grouped[group_id]] = strongest
+        diagnostics[group_id] = [
+            {
+                "group_id": group_ids[index],
+                "prototype_similarity": float(
+                    prototype_similarity[group_index, index]
+                ),
+                "query_similarity": float(query_similarity[index]),
+            }
+            for index in competitor_indices
+        ]
+    return scores, diagnostics
+
+
 def rank_semantic_entity_groups(
     embeddings: FloatArray,
     observations: Sequence[Mapping[str, object]],
@@ -547,6 +680,9 @@ def rank_semantic_entity_groups(
     min_entity_margin: float = 0.02,
     reference_mask_area: float = 4096.0,
     confirmed_only: bool = True,
+    automatic_map_negatives: bool = True,
+    map_negative_neighbors: int = 3,
+    map_negative_weight: float = 1.0,
 ) -> tuple[
     NDArray[np.float32],
     NDArray[np.float32],
@@ -562,6 +698,10 @@ def rank_semantic_entity_groups(
         raise ValueError("min_supporting_views must be positive")
     if reference_mask_area <= 0.0:
         raise ValueError("reference_mask_area must be positive")
+    if map_negative_neighbors <= 0:
+        raise ValueError("map_negative_neighbors must be positive")
+    if map_negative_weight < 0.0:
+        raise ValueError("map_negative_weight cannot be negative")
     vectors = _normalise_rows(embeddings)
     positives = _normalise_rows(positive_embeddings)
     negatives = _normalise_rows(negative_embeddings)
@@ -573,9 +713,25 @@ def rank_semantic_entity_groups(
     positive_scores = np.asarray(
         np.mean(vectors @ positives.T, axis=1), dtype=np.float32
     )
-    negative_scores = np.asarray(
+    text_negative_scores = np.asarray(
         np.max(vectors @ negatives.T, axis=1), dtype=np.float32
     )
+    map_negative_scores = np.full(len(vectors), -1.0, dtype=np.float32)
+    map_negative_diagnostics: dict[str, list[dict[str, object]]] = {}
+    if automatic_map_negatives:
+        map_negative_scores, map_negative_diagnostics = (
+            map_derived_hard_negative_scores(
+                vectors,
+                observations,
+                positives,
+                neighbors=map_negative_neighbors,
+                confirmed_only=confirmed_only,
+            )
+        )
+    negative_scores = np.maximum(
+        text_negative_scores,
+        map_negative_weight * map_negative_scores,
+    ).astype(np.float32)
     margins = np.asarray(positive_scores - negative_scores, dtype=np.float32)
     qualities = np.empty(len(observations), dtype=np.float32)
     grouped: dict[str, list[int]] = defaultdict(list)
@@ -633,6 +789,8 @@ def rank_semantic_entity_groups(
                 "supporting_observation_indices": supporting,
                 "ranked_observation_indices": ordered,
                 "mean_observation_quality": float(np.mean(qualities[indices])),
+                "map_hard_negative_score": float(map_negative_scores[indices[0]]),
+                "map_hard_negatives": map_negative_diagnostics.get(group_id, []),
                 "accepted": not rejection_reasons,
                 "rejection_reasons": rejection_reasons,
             }
@@ -796,6 +954,9 @@ def query_observation_index(
     min_view_margin: float = 0.02,
     min_entity_margin: float = 0.02,
     reference_mask_area: float = 4096.0,
+    automatic_map_negatives: bool = True,
+    map_negative_neighbors: int = 3,
+    map_negative_weight: float = 1.0,
     max_observations_per_entity: int | None = None,
     gif_width: int = 1000,
     gif_duration_ms: int = 400,
@@ -858,6 +1019,9 @@ def query_observation_index(
             min_entity_margin=min_entity_margin,
             reference_mask_area=reference_mask_area,
             confirmed_only=confirmed_only,
+            automatic_map_negatives=automatic_map_negatives,
+            map_negative_neighbors=map_negative_neighbors,
+            map_negative_weight=map_negative_weight,
         )
     )
     accepted_groups = [group for group in groups if bool(group["accepted"])]
@@ -879,6 +1043,8 @@ def query_observation_index(
             "observation_count": group["observation_count"],
             "supporting_view_count": group["supporting_view_count"],
             "mean_observation_quality": group["mean_observation_quality"],
+            "map_hard_negative_score": group["map_hard_negative_score"],
+            "map_hard_negatives": group["map_hard_negatives"],
             "observations": [],
         }
         result_groups.append(result_group)
@@ -985,6 +1151,8 @@ def query_observation_index(
             "observation_count": group["observation_count"],
             "supporting_view_count": group["supporting_view_count"],
             "mean_observation_quality": group["mean_observation_quality"],
+            "map_hard_negative_score": group["map_hard_negative_score"],
+            "map_hard_negatives": group["map_hard_negatives"],
             "rejection_reasons": group["rejection_reasons"],
         }
         for group in rejected_groups[:20]
@@ -1004,6 +1172,9 @@ def query_observation_index(
             "min_view_margin": min_view_margin,
             "min_entity_margin": min_entity_margin,
             "reference_mask_area": reference_mask_area,
+            "automatic_map_negatives": automatic_map_negatives,
+            "map_negative_neighbors": map_negative_neighbors,
+            "map_negative_weight": map_negative_weight,
         },
         "confident_match_found": bool(result_groups),
         "selected_entity_count": len(result_groups),

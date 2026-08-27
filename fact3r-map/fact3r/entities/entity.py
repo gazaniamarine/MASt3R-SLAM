@@ -32,6 +32,8 @@ class Entity:
     colour_statistics: dict[str, Any] = field(default_factory=dict)
     mast3r_descriptor_bank: NDArray[np.floating] | None = None
     descriptor_confidence: NDArray[np.floating] | None = None
+    appearance_descriptor_bank: NDArray[np.floating] | None = None
+    appearance_reliability: NDArray[np.floating] | None = None
     observation_count: int = 0
     observed_view_directions: NDArray[np.floating] | None = None
     best_observation_pose: NDArray[np.floating] | None = None
@@ -83,6 +85,51 @@ class Entity:
                     "descriptor_confidence and descriptor bank must have equal length"
                 )
 
+        if self.appearance_descriptor_bank is not None:
+            self.appearance_descriptor_bank = np.asarray(
+                self.appearance_descriptor_bank, dtype=np.float32
+            )
+            if (
+                self.appearance_descriptor_bank.ndim != 2
+                or self.appearance_descriptor_bank.shape[1] == 0
+                or not np.all(np.isfinite(self.appearance_descriptor_bank))
+            ):
+                raise ValueError(
+                    "appearance_descriptor_bank must have finite shape (N, D)"
+                )
+            norms = np.linalg.norm(
+                self.appearance_descriptor_bank, axis=1, keepdims=True
+            )
+            if np.any(norms <= 1e-12):
+                raise ValueError(
+                    "appearance_descriptor_bank cannot contain zero vectors"
+                )
+            self.appearance_descriptor_bank = np.ascontiguousarray(
+                self.appearance_descriptor_bank / norms, dtype=np.float32
+            )
+
+        if self.appearance_reliability is not None:
+            self.appearance_reliability = np.asarray(
+                self.appearance_reliability, dtype=np.float32
+            ).reshape(-1)
+            if self.appearance_descriptor_bank is None:
+                raise ValueError(
+                    "appearance_reliability requires appearance_descriptor_bank"
+                )
+            if len(self.appearance_reliability) != len(
+                self.appearance_descriptor_bank
+            ):
+                raise ValueError(
+                    "appearance reliability and bank must have equal length"
+                )
+            if not np.all(np.isfinite(self.appearance_reliability)) or np.any(
+                (self.appearance_reliability < 0.0)
+                | (self.appearance_reliability > 1.0)
+            ):
+                raise ValueError(
+                    "appearance_reliability must be finite and in [0, 1]"
+                )
+
         if self.observed_view_directions is not None:
             self.observed_view_directions = np.asarray(
                 self.observed_view_directions, dtype=np.float32
@@ -99,4 +146,3 @@ class Entity:
             )
             if self.best_observation_pose.shape != (4, 4):
                 raise ValueError("best_observation_pose must have shape (4, 4)")
-

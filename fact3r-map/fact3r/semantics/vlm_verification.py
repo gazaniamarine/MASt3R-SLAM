@@ -24,6 +24,7 @@ from fact3r.semantics.observation_index import (
     VisionLanguageEncoder,
     default_positive_prompts,
     load_observation_index,
+    map_derived_hard_negative_scores,
 )
 from fact3r.visualization.association import mask_boundary
 
@@ -441,18 +442,31 @@ def rank_vlm_candidates(
     top_views: int = 3,
     min_observations: int = 2,
     reference_mask_area: float = 4096.0,
+    map_negative_neighbors: int = 3,
+    map_negative_weight: float = 1.0,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32], list[dict[str, object]]]:
-    """Build a high-recall confirmed-entity shortlist without confounders."""
+    """Build a shortlist using nearest map entities as automatic confounders."""
 
     if top_views <= 0 or min_observations <= 0:
         raise ValueError("top_views and min_observations must be positive")
     if reference_mask_area <= 0.0:
         raise ValueError("reference_mask_area must be positive")
+    if map_negative_neighbors <= 0 or map_negative_weight < 0.0:
+        raise ValueError("map-negative settings are invalid")
     vectors = _normalise_rows(embeddings)
     positives = _normalise_rows(positive_embeddings)
     if positives.shape[1] != vectors.shape[1]:
         raise ValueError("positive prompt and observation dimensions differ")
     scores = np.asarray(np.mean(vectors @ positives.T, axis=1), dtype=np.float32)
+    map_negative_scores, map_negative_diagnostics = (
+        map_derived_hard_negative_scores(
+            vectors,
+            observations,
+            positives,
+            neighbors=map_negative_neighbors,
+            confirmed_only=True,
+        )
+    )
     qualities = np.zeros(len(observations), dtype=np.float32)
     grouped: dict[str, list[int]] = {}
     for index, observation in enumerate(observations):
@@ -477,9 +491,15 @@ def rank_vlm_candidates(
         evidence = ordered[: min(top_views, len(ordered))]
         weights = qualities[evidence].astype(np.float64)
         if float(weights.sum()) <= 1e-12:
-            score = float(np.mean(scores[evidence]))
+            positive_score = float(np.mean(scores[evidence]))
         else:
-            score = float(np.average(scores[evidence], weights=weights))
+            positive_score = float(np.average(scores[evidence], weights=weights))
+        raw_hard_negative_score = float(map_negative_scores[indices[0]])
+        # ``-1`` is the sentinel used when no competing map entity exists.  A
+        # missing negative must be neutral rather than accidentally boosting a
+        # one-entity map, and an anticorrelated competitor is not a confounder.
+        hard_negative_score = max(0.0, raw_hard_negative_score)
+        score = positive_score - map_negative_weight * hard_negative_score
         first = observations[indices[0]]
         groups.append(
             {
@@ -487,6 +507,9 @@ def rank_vlm_candidates(
                 "entity_id": entity_id,
                 "track_id": first.get("track_id"),
                 "candidate_score": score,
+                "positive_candidate_score": positive_score,
+                "map_hard_negative_score": hard_negative_score,
+                "map_hard_negatives": map_negative_diagnostics.get(entity_id, []),
                 "observation_count": len(indices),
                 "mean_observation_quality": float(np.mean(qualities[indices])),
                 "observation_indices": indices,
@@ -586,6 +609,8 @@ class PreparedVLMQuery:
     siglip_load_seconds: float
     text_encoding_seconds: float
     preparation_seconds: float
+    map_negative_neighbors: int
+    map_negative_weight: float
 
 
 def prepare_vlm_query(
@@ -598,6 +623,8 @@ def prepare_vlm_query(
     top_views: int = 3,
     min_observations: int = 2,
     reference_mask_area: float = 4096.0,
+    map_negative_neighbors: int = 3,
+    map_negative_weight: float = 1.0,
 ) -> PreparedVLMQuery:
     """Shortlist candidates with SigLIP and render their multi-view evidence."""
 
@@ -623,6 +650,8 @@ def prepare_vlm_query(
         top_views=top_views,
         min_observations=min_observations,
         reference_mask_area=reference_mask_area,
+        map_negative_neighbors=map_negative_neighbors,
+        map_negative_weight=map_negative_weight,
     )
     candidates = groups[:max_candidates]
     output_directory = Path(output)
@@ -686,6 +715,8 @@ def prepare_vlm_query(
         siglip_load_seconds=float(encoder.load_seconds),
         text_encoding_seconds=text_seconds,
         preparation_seconds=perf_counter() - started,
+        map_negative_neighbors=map_negative_neighbors,
+        map_negative_weight=map_negative_weight,
     )
 
 
@@ -1085,6 +1116,8 @@ def verify_prepared_query(
             "min_vlm_supporting_views": min_supporting_views,
             "max_entities": max_entities,
             "prompt_version": PROMPT_VERSION,
+            "map_hard_negative_neighbors": prepared.map_negative_neighbors,
+            "map_hard_negative_weight": prepared.map_negative_weight,
         },
         "confident_match_found": bool(entity_results),
         "selected_entity_count": len(entity_results),

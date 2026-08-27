@@ -1,6 +1,7 @@
 """Proposal-to-entity association models."""
 
 from fact3r.association.baseline_mapper import (
+    AppearanceMemoryConfig,
     FrameMappingResult,
     HungarianEntityMapper,
     HungarianMapConfig,
@@ -31,6 +32,7 @@ from fact3r.association.sinkhorn_mapper import (
     SinkhornFrameMappingResult,
 )
 from fact3r.association.residual_mapper import (
+    AppearanceMemoryDecision,
     BirthCommitmentDecision,
     BirthCommitmentStatus,
     DelayedCommitmentConfig,
@@ -62,6 +64,8 @@ from fact3r.association.visibility import (
 )
 
 __all__ = [
+    "AppearanceMemoryConfig",
+    "AppearanceMemoryDecision",
     "BalancedSinkhornConfig",
     "BalancedSinkhornEntityMapper",
     "BalancedSinkhornResult",
