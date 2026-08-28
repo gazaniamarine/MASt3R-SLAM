@@ -488,8 +488,13 @@ def build_observation_index(
 
     elapsed = perf_counter() - started
     manifest = {
-        "format": "fact3r-siglip-observation-index",
+        "format": getattr(
+            encoder, "index_format", "fact3r-siglip-observation-index"
+        ),
         "version": 1,
+        "semantic_query_capable": bool(
+            getattr(encoder, "semantic_query_capable", True)
+        ),
         "model": encoder.model_name,
         "device": encoder.device_name,
         "source_keyframes": str(keyframe_directory.resolve()),
@@ -548,6 +553,7 @@ def load_observation_index(
     if manifest.get("format") not in {
         "fact3r-siglip-observation-index",
         "fact3r-vla-visual-observation-index",
+        "fact3r-qwen-embedding-observation-index",
     }:
         raise ValueError(f"unsupported observation index {manifest_path}")
     if manifest.get("version") != 1:

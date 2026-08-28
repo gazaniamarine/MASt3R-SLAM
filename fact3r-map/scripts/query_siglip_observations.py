@@ -17,6 +17,7 @@ from fact3r.semantics.observation_index import (  # noqa: E402
     load_observation_index,
     query_observation_index,
 )
+from fact3r.semantics.qwen_embedding import Qwen3VLEmbeddingEncoder  # noqa: E402
 
 
 def _default_output(index: Path, query: str) -> Path:
@@ -34,6 +35,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--device", default="auto", help="auto, cpu, mps, cuda, or CUDA index"
+    )
+    parser.add_argument("--device-map", default="auto")
+    parser.add_argument(
+        "--dtype",
+        choices=("auto", "bfloat16", "float16", "float32"),
+        default="auto",
     )
     parser.add_argument("--max-entities", type=int, default=3)
     parser.add_argument(
@@ -80,9 +87,22 @@ def main() -> None:
     args = parser.parse_args()
 
     _, manifest, _ = load_observation_index(args.index)
+    if not manifest.get("semantic_query_capable", True):
+        raise ValueError(
+            "this index contains raw VLA appearance features only; build a "
+            "Qwen3-VL-Embedding semantic index before running text queries"
+        )
     output = args.output or _default_output(args.index, args.query)
-    print(f"Loading {manifest['model']} on {args.device}...")
-    encoder = Siglip2Encoder(str(manifest["model"]), device=args.device)
+    if manifest.get("format") == "fact3r-qwen-embedding-observation-index":
+        print(f"Loading {manifest['model']} with device map {args.device_map}...")
+        encoder = Qwen3VLEmbeddingEncoder(
+            str(manifest["model"]),
+            device_map=args.device_map,
+            dtype=args.dtype,
+        )
+    else:
+        print(f"Loading {manifest['model']} on {args.device}...")
+        encoder = Siglip2Encoder(str(manifest["model"]), device=args.device)
     result_path = query_observation_index(
         index=args.index,
         query=args.query,
