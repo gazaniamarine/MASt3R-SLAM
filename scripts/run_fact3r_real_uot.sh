@@ -25,6 +25,7 @@ sam_discovery_model="facebook/sam2-hiera-large"
 sam_tracking_model="facebook/sam2-hiera-small"
 realtime_preset="false"
 ultra_fast_preset="false"
+high_recall_preset="false"
 pred_iou_threshold="0.75"
 stability_score_threshold="0.85"
 min_area_pixels="40"
@@ -46,6 +47,7 @@ usage() {
     echo "  --sam-tracking-model ID    video model (default: Hiera-Small)"
     echo "  --realtime-preset          Small discovery + Tiny tracking, 48x48 grid"
     echo "  --ultra-fast-preset        Tiny discovery/tracking, 24x24 grid (low recall)"
+    echo "  --high-recall-preset       Large discovery + Tiny tracking, 64x64 grid"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --sam-tracking-model) sam_tracking_model=${2:?}; shift 2 ;;
         --realtime-preset) realtime_preset="true"; shift ;;
         --ultra-fast-preset) ultra_fast_preset="true"; shift ;;
+        --high-recall-preset) high_recall_preset="true"; shift ;;
         --max-seeds-per-batch) max_seeds_per_batch=${2:?}; shift 2 ;;
         --siglip-batch-size) siglip_batch_size=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -73,9 +76,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$realtime_preset" == "true" && "$ultra_fast_preset" == "true" ]]; then
-    echo "Choose only one of --realtime-preset and --ultra-fast-preset" >&2
+selected_preset_count=0
+if [[ "$realtime_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
+if [[ "$ultra_fast_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
+if [[ "$high_recall_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
+if [[ "$selected_preset_count" -gt 1 ]]; then
+    echo "Choose only one segmentation preset" >&2
     exit 2
+fi
+
+if [[ "$high_recall_preset" == "true" ]]; then
+    sam_discovery_model="facebook/sam2-hiera-large"
+    sam_tracking_model="facebook/sam2.1-hiera-tiny"
+    points_per_side="64"
+    points_per_batch="64"
+    max_seeds_per_batch="16"
+    sam_refresh_seconds="5"
+    pred_iou_threshold="0.70"
+    stability_score_threshold="0.80"
+    min_area_pixels="20"
+    min_area_fraction="0.0001"
+    min_component_pixels="10"
 fi
 
 if [[ "$realtime_preset" == "true" ]]; then
