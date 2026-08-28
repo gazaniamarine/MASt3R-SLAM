@@ -77,6 +77,9 @@ def main() -> None:
     )
     print(
         "Association diagnostic: "
+        f"tracks={diagnostic['track_observation_count']}/"
+        f"{diagnostic['observation_count']}, "
+        f"source links={diagnostic['explicit_source_link_count']}, "
         f"linked median={diagnostic['linked_cosine_median']}, "
         "strongest unrelated median="
         f"{diagnostic['strongest_unrelated_cosine_median']}, "
@@ -108,6 +111,9 @@ def main() -> None:
         )
         print(
             f"Comparison ({comparison_manifest['model']}): "
+            f"tracks={comparison['track_observation_count']}/"
+            f"{comparison['observation_count']}, "
+            f"source links={comparison['explicit_source_link_count']}, "
             f"linked median={comparison['linked_cosine_median']}, "
             "strongest unrelated median="
             f"{comparison['strongest_unrelated_cosine_median']}, "

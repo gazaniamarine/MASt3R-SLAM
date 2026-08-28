@@ -264,6 +264,11 @@ def build_qwen_visual_index(
                     "timestamp": keyframe.timestamp,
                     "entity_id": None,
                     "track_id": None if tracklet is None else tracklet.track_id,
+                    "source_proposal_id": (
+                        None
+                        if tracklet is None
+                        else tracklet.source_proposal_id
+                    ),
                     "group_id": (
                         f"observation-{index:06d}"
                         if tracklet is None
@@ -360,6 +365,9 @@ def visual_link_diagnostics(
     """Measure whether shared VLM features preserve short-term identity."""
 
     vectors = _normalise_rows(embeddings)
+    by_proposal = {
+        str(item["proposal_id"]): index for index, item in enumerate(observations)
+    }
     linked_scores = []
     negative_scores = []
     paired_margins = []
@@ -370,13 +378,18 @@ def visual_link_diagnostics(
         frame_rows.setdefault(int(item["frame_id"]), []).append(index)
     last_by_track: dict[str, int] = {}
     for current_index, item in enumerate(observations):
-        # Recover the previous observation through the persistent SAM track.
+        # Prefer the explicit incoming SAM2 edge. Persistent track identity is
+        # only a compatibility fallback for older indexes.
         track_id = item.get("track_id")
-        if track_id is None:
-            continue
-        track_key = str(track_id)
-        source_index = last_by_track.get(track_key)
-        last_by_track[track_key] = current_index
+        track_key = None if track_id is None else str(track_id)
+        source_id = item.get("source_proposal_id")
+        source_index = (
+            None if source_id is None else by_proposal.get(str(source_id))
+        )
+        if source_index is None and track_key is not None:
+            source_index = last_by_track.get(track_key)
+        if track_key is not None:
+            last_by_track[track_key] = current_index
         if source_index is None:
             continue
         linked_scores.append(float(vectors[current_index] @ vectors[source_index]))
@@ -384,7 +397,8 @@ def visual_link_diagnostics(
         pool = [
             index
             for index in frame_rows.get(previous_frame, [])
-            if observations[index].get("track_id") != track_id
+            if index != source_index
+            and observations[index].get("track_id") != track_id
         ]
         if pool:
             similarities = vectors[pool] @ vectors[current_index]
@@ -398,6 +412,13 @@ def visual_link_diagnostics(
     negatives = np.asarray(negative_scores, dtype=np.float32)
     return {
         "linked_pair_count": len(linked_scores),
+        "observation_count": len(observations),
+        "track_observation_count": sum(
+            item.get("track_id") is not None for item in observations
+        ),
+        "explicit_source_link_count": sum(
+            item.get("source_proposal_id") is not None for item in observations
+        ),
         "linked_cosine_median": (
             None if len(linked) == 0 else float(np.median(linked))
         ),

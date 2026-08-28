@@ -10,10 +10,30 @@ from fact3r.semantics.qwen_visual_memory import visual_link_diagnostics
 class QwenVisualMemoryTests(unittest.TestCase):
     def test_link_diagnostic_separates_tracks(self) -> None:
         observations = [
-            {"proposal_id": "a0", "frame_id": 0, "track_id": "a"},
-            {"proposal_id": "b0", "frame_id": 0, "track_id": "b"},
-            {"proposal_id": "a1", "frame_id": 1, "track_id": "a"},
-            {"proposal_id": "b1", "frame_id": 1, "track_id": "b"},
+            {
+                "proposal_id": "a0",
+                "frame_id": 0,
+                "track_id": "a",
+                "source_proposal_id": None,
+            },
+            {
+                "proposal_id": "b0",
+                "frame_id": 0,
+                "track_id": "b",
+                "source_proposal_id": None,
+            },
+            {
+                "proposal_id": "a1",
+                "frame_id": 1,
+                "track_id": "new-id-is-allowed",
+                "source_proposal_id": "a0",
+            },
+            {
+                "proposal_id": "b1",
+                "frame_id": 1,
+                "track_id": "b",
+                "source_proposal_id": "b0",
+            },
         ]
         embeddings = np.asarray(
             [[1.0, 0.0], [0.0, 1.0], [0.99, 0.01], [0.01, 0.99]],
@@ -22,6 +42,7 @@ class QwenVisualMemoryTests(unittest.TestCase):
         result = visual_link_diagnostics(embeddings, observations)
         self.assertEqual(result["linked_pair_count"], 2)
         self.assertEqual(result["top1_trial_count"], 2)
+        self.assertEqual(result["explicit_source_link_count"], 2)
         self.assertEqual(result["previous_frame_top1_accuracy"], 1.0)
         self.assertGreater(result["median_link_margin"], 0.9)
 
