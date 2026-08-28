@@ -545,7 +545,10 @@ def load_observation_index(
 ) -> tuple[Path, dict[str, object], NDArray[np.float32]]:
     manifest_path = _manifest_path(index)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("format") != "fact3r-siglip-observation-index":
+    if manifest.get("format") not in {
+        "fact3r-siglip-observation-index",
+        "fact3r-vla-visual-observation-index",
+    }:
         raise ValueError(f"unsupported observation index {manifest_path}")
     if manifest.get("version") != 1:
         raise ValueError(
