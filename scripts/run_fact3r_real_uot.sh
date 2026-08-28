@@ -20,6 +20,9 @@ points_per_side="64"
 points_per_batch="32"
 max_seeds_per_batch="16"
 siglip_batch_size="32"
+sam_refresh_seconds="5"
+sam_discovery_model="facebook/sam2-hiera-large"
+sam_tracking_model="facebook/sam2-hiera-small"
 
 usage() {
     echo "Usage: $0 --video VIDEO [options]"
@@ -32,6 +35,8 @@ usage() {
     echo "  --sam2-env NAME            segmentation/index env (default: SAM2)"
     echo "  --device DEVICE            CUDA device/index (default: 0)"
     echo "  --points-per-side N        dense SAM2 prompt grid (default: 64)"
+    echo "  --sam-refresh-seconds S    dense discovery period (default: 5)"
+    echo "  --sam-tracking-model ID    video model (default: Hiera-Small)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -47,6 +52,9 @@ while [[ $# -gt 0 ]]; do
         --device) device=${2:?}; shift 2 ;;
         --points-per-side) points_per_side=${2:?}; shift 2 ;;
         --points-per-batch) points_per_batch=${2:?}; shift 2 ;;
+        --sam-refresh-seconds) sam_refresh_seconds=${2:?}; shift 2 ;;
+        --sam-discovery-model) sam_discovery_model=${2:?}; shift 2 ;;
+        --sam-tracking-model) sam_tracking_model=${2:?}; shift 2 ;;
         --max-seeds-per-batch) max_seeds_per_batch=${2:?}; shift 2 ;;
         --siglip-batch-size) siglip_batch_size=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -86,6 +94,7 @@ mapping="$output/image_uot"
 observations="$output/siglip_observations"
 mkdir -p "$output"
 cd "$repository_root"
+refresh_frames=$(awk -v fps="$sample_fps" -v seconds="$sam_refresh_seconds" 'BEGIN {value=int(fps*seconds+0.5); if (value < 1) value=1; print value}')
 
 overall_start=$SECONDS
 frames_seconds=0
@@ -108,33 +117,28 @@ else
     echo "[1/7] Reusing sampled RGB frames"
 fi
 
-if [[ ! -f "$proposals/manifest.json" ]]; then
-    echo "[2/7] Generating SAM2 masks with duplicate and border-fragment filtering"
+if [[ ! -f "$proposals/manifest.json" || ! -f "$tracklets/manifest.json" ]]; then
+    echo "[2-3/7] Causal SAM2: dense discovery every $refresh_frames frames, video memory between"
     stage_start=$SECONDS
-    "${sam2_python[@]}" fact3r-map/scripts/build_sam2_proposals.py \
-        --keyframes "$frames" --output "$proposals" --backend official \
-        --device "$device" --points-per-side "$points_per_side" \
+    "${sam2_python[@]}" fact3r-map/scripts/build_streaming_sam2_memory.py \
+        --keyframes "$frames" \
+        --proposals-output "$proposals" \
+        --tracklets-output "$tracklets" \
+        --discovery-model "$sam_discovery_model" \
+        --tracking-model "$sam_tracking_model" \
+        --device "$device" \
+        --refresh-frames "$refresh_frames" \
+        --points-per-side "$points_per_side" \
         --points-per-batch "$points_per_batch" \
+        --max-seeds-per-batch "$max_seeds_per_batch" \
         --pred-iou-threshold 0.75 \
         --stability-score-threshold 0.85 \
         --min-area-pixels 40 \
         --min-area-fraction 0.0002 \
-        --erosion-pixels 0 \
         --min-component-pixels 20
     proposals_seconds=$((SECONDS - stage_start))
 else
-    echo "[2/7] Reusing SAM2 proposals"
-fi
-
-if [[ ! -f "$tracklets/manifest.json" ]]; then
-    echo "[3/7] Building SAM2 temporal mask links"
-    stage_start=$SECONDS
-    "${sam2_python[@]}" fact3r-map/scripts/build_sam2_tracklets.py \
-        --keyframes "$frames" --proposals "$proposals" --output "$tracklets" \
-        --device "$device" --max-seeds-per-batch "$max_seeds_per_batch"
-    tracklets_seconds=$((SECONDS - stage_start))
-else
-    echo "[3/7] Reusing SAM2 temporal links"
+    echo "[2-3/7] Reusing causal SAM2 proposals and temporal links"
 fi
 
 if [[ ! -f "$appearance/manifest.json" ]]; then
@@ -197,7 +201,7 @@ echo "  sampled frames:       $frame_count"
 echo "  wall-clock time:      ${overall_seconds}s"
 echo "  effective throughput: $effective_fps processed FPS"
 echo "  real-time factor:     ${realtime_factor}x (>=1.0 keeps up)"
-echo "  stage seconds: frames=$frames_seconds SAM2=$proposals_seconds tracklets=$tracklets_seconds SigLIP=$appearance_seconds MASt3R=$matches_seconds UOT=$mapping_seconds attach=$attachment_seconds"
+echo "  stage seconds: frames=$frames_seconds streaming_SAM2=$proposals_seconds SigLIP=$appearance_seconds MASt3R=$matches_seconds UOT=$mapping_seconds attach=$attachment_seconds"
 if [[ -n "$query" ]]; then
     "${sam2_python[@]}" fact3r-map/scripts/query_siglip_observations.py \
         --index "$observations" --query "$query" --device "$device" \
