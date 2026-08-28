@@ -23,6 +23,7 @@ siglip_batch_size="32"
 sam_refresh_seconds="5"
 sam_discovery_model="facebook/sam2-hiera-large"
 sam_tracking_model="facebook/sam2-hiera-small"
+realtime_preset="false"
 
 usage() {
     echo "Usage: $0 --video VIDEO [options]"
@@ -37,6 +38,7 @@ usage() {
     echo "  --points-per-side N        dense SAM2 prompt grid (default: 64)"
     echo "  --sam-refresh-seconds S    dense discovery period (default: 5)"
     echo "  --sam-tracking-model ID    video model (default: Hiera-Small)"
+    echo "  --realtime-preset          use Hiera-Tiny and a 24x24 discovery grid"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -55,12 +57,22 @@ while [[ $# -gt 0 ]]; do
         --sam-refresh-seconds) sam_refresh_seconds=${2:?}; shift 2 ;;
         --sam-discovery-model) sam_discovery_model=${2:?}; shift 2 ;;
         --sam-tracking-model) sam_tracking_model=${2:?}; shift 2 ;;
+        --realtime-preset) realtime_preset="true"; shift ;;
         --max-seeds-per-batch) max_seeds_per_batch=${2:?}; shift 2 ;;
         --siglip-batch-size) siglip_batch_size=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+if [[ "$realtime_preset" == "true" ]]; then
+    sam_discovery_model="facebook/sam2.1-hiera-tiny"
+    sam_tracking_model="facebook/sam2.1-hiera-tiny"
+    points_per_side="24"
+    points_per_batch="64"
+    max_seeds_per_batch="8"
+    sam_refresh_seconds="10"
+fi
 
 if [[ -z "$video" || ! -f "$video" ]]; then
     echo "--video must point to an existing video file" >&2
