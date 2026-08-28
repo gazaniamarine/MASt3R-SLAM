@@ -105,9 +105,24 @@ def remove_small_components(
 ) -> NDArray[np.bool_]:
     """Keep 4-connected components large enough to be plausible 3D support."""
 
+    selected = np.asarray(mask, dtype=bool)
+    try:
+        import cv2
+    except ImportError:
+        cv2 = None
+    if cv2 is not None:
+        component_count, labels, statistics, _ = cv2.connectedComponentsWithStats(
+            selected.astype(np.uint8, copy=False), connectivity=4
+        )
+        if component_count <= 1:
+            return np.zeros_like(selected, dtype=bool)
+        keep = np.zeros(component_count, dtype=bool)
+        keep[1:] = statistics[1:, cv2.CC_STAT_AREA] >= min_component_pixels
+        return np.ascontiguousarray(keep[labels])
+
     height, width = mask.shape
-    remaining = set(map(tuple, np.argwhere(mask)))
-    cleaned = np.zeros_like(mask, dtype=bool)
+    remaining = set(map(tuple, np.argwhere(selected)))
+    cleaned = np.zeros_like(selected, dtype=bool)
     while remaining:
         seed = remaining.pop()
         component = [seed]

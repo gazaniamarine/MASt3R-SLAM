@@ -27,6 +27,7 @@ from fact3r.integrations.mast3r_slam import iter_exported_keyframes  # noqa: E40
 from fact3r.proposals.mask_filter import (  # noqa: E402
     MaskFilterConfig,
     filter_image_mask_proposals,
+    mask_iou,
 )
 from fact3r.proposals.mask_generator import MaskProposal2D  # noqa: E402
 from fact3r.proposals.proposal_pipeline import (  # noqa: E402
@@ -222,6 +223,10 @@ def main() -> None:
     discovery_frames = 0
     discovery_seconds = 0.0
     propagation_seconds = 0.0
+    propagated_filter_seconds = 0.0
+    linking_seconds = 0.0
+    storage_seconds = 0.0
+    initialization_seconds = perf_counter() - started
 
     temporary_context = (
         tempfile.TemporaryDirectory(prefix="fact3r_streaming_sam2_")
@@ -277,6 +282,7 @@ def main() -> None:
                 discovery_seconds += perf_counter() - stage_started
                 discovery_frames += 1
             else:
+                stage_started = perf_counter()
                 target_generated = _propagated_proposals(
                     propagated_masks,
                     source_generated,
@@ -288,13 +294,40 @@ def main() -> None:
                         else "optical-flow-memory"
                     ),
                 )
+                propagated_filter_seconds += perf_counter() - stage_started
 
             target_ids = tuple(item.mask_2d.proposal_id for item in target_generated)
             target_masks = tuple(item.mask_2d.mask for item in target_generated)
             observations = []
             target_tracks: dict[str, str] = {}
+            link_started = perf_counter()
+            link_payload_by_target: dict[str, tuple[str, float]] = {}
             if frame_index == 0:
-                links_by_target = {}
+                pass
+            elif not refresh:
+                source_mask_by_id = {
+                    item.mask_2d.proposal_id: propagated_masks[index]
+                    for index, item in enumerate(source_generated)
+                }
+                for target in target_generated:
+                    source_proposal_id = target.mask_2d.metadata.get(
+                        "source_proposal_id"
+                    )
+                    if (
+                        source_proposal_id is None
+                        or str(source_proposal_id) not in source_tracks
+                        or str(source_proposal_id) not in source_mask_by_id
+                    ):
+                        continue
+                    source_proposal_id = str(source_proposal_id)
+                    link_payload_by_target[target.mask_2d.proposal_id] = (
+                        source_proposal_id,
+                        mask_iou(
+                            target.mask_2d.mask,
+                            source_mask_by_id[source_proposal_id],
+                        ),
+                    )
+                link_count += len(link_payload_by_target)
             else:
                 links = (
                     ()
@@ -309,19 +342,25 @@ def main() -> None:
                         min_mask_iou=args.min_link_iou,
                     )
                 )
-                links_by_target = {item.target_proposal_id: item for item in links}
+                link_payload_by_target = {
+                    item.target_proposal_id: (
+                        item.source_proposal_id,
+                        item.mask_iou,
+                    )
+                    for item in links
+                }
                 link_count += len(links)
+            linking_seconds += perf_counter() - link_started
             for proposal_id in target_ids:
-                link = links_by_target.get(proposal_id)
-                if link is None:
+                link_payload = link_payload_by_target.get(proposal_id)
+                if link_payload is None:
                     track_id = f"track-{next_track_index:06d}"
                     next_track_index += 1
                     source_proposal_id = None
                     link_iou = None
                 else:
-                    track_id = source_tracks[link.source_proposal_id]
-                    source_proposal_id = link.source_proposal_id
-                    link_iou = link.mask_iou
+                    source_proposal_id, link_iou = link_payload
+                    track_id = source_tracks[source_proposal_id]
                 target_tracks[proposal_id] = track_id
                 observations.append(
                     {
@@ -331,9 +370,11 @@ def main() -> None:
                         "link_iou": link_iou,
                     }
                 )
+            storage_started = perf_counter()
             summary = save_frame_proposals(
                 args.proposals_output, keyframe, target_generated
             )
+            storage_seconds += perf_counter() - storage_started
             proposal_summaries.append(summary)
             tracklet_frames.append(
                 {"frame_id": keyframe.frame_id, "observations": observations}
@@ -370,6 +411,10 @@ def main() -> None:
             "discovery_frames": discovery_frames,
             "discovery_seconds": discovery_seconds,
             "propagation_seconds": propagation_seconds,
+            "propagated_filter_seconds": propagated_filter_seconds,
+            "linking_seconds": linking_seconds,
+            "storage_seconds": storage_seconds,
+            "initialization_seconds": initialization_seconds,
             "total_seconds": perf_counter() - started,
         },
         "frames": [
@@ -410,7 +455,10 @@ def main() -> None:
     print(
         f"Streaming SAM2: {len(keyframes)} frames, {discovery_frames} dense "
         f"refreshes, discovery={discovery_seconds:.1f}s, "
-        f"propagation={propagation_seconds:.1f}s"
+        f"propagation={propagation_seconds:.1f}s, "
+        f"filter={propagated_filter_seconds:.1f}s, "
+        f"link={linking_seconds:.1f}s, storage={storage_seconds:.1f}s, "
+        f"initialization={initialization_seconds:.1f}s"
     )
 
 
