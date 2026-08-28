@@ -24,6 +24,12 @@ sam_refresh_seconds="5"
 sam_discovery_model="facebook/sam2-hiera-large"
 sam_tracking_model="facebook/sam2-hiera-small"
 realtime_preset="false"
+ultra_fast_preset="false"
+pred_iou_threshold="0.75"
+stability_score_threshold="0.85"
+min_area_pixels="40"
+min_area_fraction="0.0002"
+min_component_pixels="20"
 
 usage() {
     echo "Usage: $0 --video VIDEO [options]"
@@ -38,7 +44,8 @@ usage() {
     echo "  --points-per-side N        dense SAM2 prompt grid (default: 64)"
     echo "  --sam-refresh-seconds S    dense discovery period (default: 5)"
     echo "  --sam-tracking-model ID    video model (default: Hiera-Small)"
-    echo "  --realtime-preset          use Hiera-Tiny and a 24x24 discovery grid"
+    echo "  --realtime-preset          Small discovery + Tiny tracking, 48x48 grid"
+    echo "  --ultra-fast-preset        Tiny discovery/tracking, 24x24 grid (low recall)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -58,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --sam-discovery-model) sam_discovery_model=${2:?}; shift 2 ;;
         --sam-tracking-model) sam_tracking_model=${2:?}; shift 2 ;;
         --realtime-preset) realtime_preset="true"; shift ;;
+        --ultra-fast-preset) ultra_fast_preset="true"; shift ;;
         --max-seeds-per-batch) max_seeds_per_batch=${2:?}; shift 2 ;;
         --siglip-batch-size) siglip_batch_size=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -65,13 +73,37 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$realtime_preset" == "true" && "$ultra_fast_preset" == "true" ]]; then
+    echo "Choose only one of --realtime-preset and --ultra-fast-preset" >&2
+    exit 2
+fi
+
 if [[ "$realtime_preset" == "true" ]]; then
+    sam_discovery_model="facebook/sam2-hiera-small"
+    sam_tracking_model="facebook/sam2.1-hiera-tiny"
+    points_per_side="48"
+    points_per_batch="64"
+    max_seeds_per_batch="12"
+    sam_refresh_seconds="5"
+    pred_iou_threshold="0.70"
+    stability_score_threshold="0.80"
+    min_area_pixels="20"
+    min_area_fraction="0.0001"
+    min_component_pixels="10"
+fi
+
+if [[ "$ultra_fast_preset" == "true" ]]; then
     sam_discovery_model="facebook/sam2.1-hiera-tiny"
     sam_tracking_model="facebook/sam2.1-hiera-tiny"
     points_per_side="24"
     points_per_batch="64"
     max_seeds_per_batch="8"
     sam_refresh_seconds="10"
+    pred_iou_threshold="0.75"
+    stability_score_threshold="0.85"
+    min_area_pixels="40"
+    min_area_fraction="0.0002"
+    min_component_pixels="20"
 fi
 
 if [[ -z "$video" || ! -f "$video" ]]; then
@@ -143,11 +175,11 @@ if [[ ! -f "$proposals/manifest.json" || ! -f "$tracklets/manifest.json" ]]; the
         --points-per-side "$points_per_side" \
         --points-per-batch "$points_per_batch" \
         --max-seeds-per-batch "$max_seeds_per_batch" \
-        --pred-iou-threshold 0.75 \
-        --stability-score-threshold 0.85 \
-        --min-area-pixels 40 \
-        --min-area-fraction 0.0002 \
-        --min-component-pixels 20
+        --pred-iou-threshold "$pred_iou_threshold" \
+        --stability-score-threshold "$stability_score_threshold" \
+        --min-area-pixels "$min_area_pixels" \
+        --min-area-fraction "$min_area_fraction" \
+        --min-component-pixels "$min_component_pixels"
     proposals_seconds=$((SECONDS - stage_start))
 else
     echo "[2-3/7] Reusing causal SAM2 proposals and temporal links"
