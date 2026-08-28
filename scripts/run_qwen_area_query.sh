@@ -24,7 +24,7 @@ fi
 if [[ "$run_root" != /* ]]; then run_root="$repository_root/$run_root"; fi
 frames="$run_root/frames"
 memory="$run_root/qwen_scene_memory"
-python_command=(conda run -n "$environment" python3)
+python_command=(conda run --no-capture-output -n "$environment" python3)
 cd "$repository_root"
 
 if [[ ! -f "$memory/manifest.json" ]]; then
