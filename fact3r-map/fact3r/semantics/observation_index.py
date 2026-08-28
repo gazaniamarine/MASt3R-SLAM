@@ -1116,6 +1116,7 @@ def query_observation_index(
     max_observations_per_entity: int | None = None,
     gif_width: int = 1000,
     gif_duration_ms: int = 400,
+    render_outputs: bool = True,
 ) -> Path:
     """Retrieve verified semantic entities and render every stored view."""
 
@@ -1181,6 +1182,7 @@ def query_observation_index(
             map_negative_weight=map_negative_weight,
         )
     )
+    ranking_seconds = perf_counter() - text_started - text_seconds
     accepted_groups = [group for group in groups if bool(group["accepted"])]
     rejected_groups = [group for group in groups if not bool(group["accepted"])]
     selected_groups = accepted_groups[:max_entities]
@@ -1229,15 +1231,21 @@ def query_observation_index(
         result_group_lookup[str(group["group_id"])] = result_group
 
     selected_rows: list[tuple[dict[str, object], dict[str, object]]] = []
-    for group in selected_groups:
-        indices = list(group["ranked_observation_indices"])
-        if max_observations_per_entity is not None:
-            indices = indices[:max_observations_per_entity]
-        indices.sort(key=lambda index_value: int(observations[index_value]["frame_id"]))
-        for observation_index in indices:
-            selected_rows.append((group, observations[observation_index]))
+    if render_outputs:
+        for group in selected_groups:
+            indices = list(group["ranked_observation_indices"])
+            if max_observations_per_entity is not None:
+                indices = indices[:max_observations_per_entity]
+            indices.sort(
+                key=lambda index_value: int(
+                    observations[index_value]["frame_id"]
+                )
+            )
+            for observation_index in indices:
+                selected_rows.append((group, observations[observation_index]))
 
     rendered: list[tuple[Path, dict[str, object]]] = []
+    rendering_started = perf_counter()
     if selected_rows:
         needed_frames = {int(row[1]["frame_id"]) for row in selected_rows}
         keyframe_images = {
@@ -1323,11 +1331,13 @@ def query_observation_index(
             gif_duration_ms=gif_duration_ms,
         )
     else:
-        _write_no_match_html(
-            output_directory,
-            query=query,
-            rejected_groups=rejected_groups,
-        )
+        if render_outputs:
+            _write_no_match_html(
+                output_directory,
+                query=query,
+                rejected_groups=rejected_groups,
+            )
+    rendering_seconds = perf_counter() - rendering_started
 
     rejected_diagnostics = [
         {
@@ -1370,11 +1380,13 @@ def query_observation_index(
         "timing": {
             "model_load_seconds": float(encoder.load_seconds),
             "text_encoding_seconds": text_seconds,
+            "ranking_seconds": ranking_seconds,
+            "rendering_seconds": rendering_seconds,
             "total_query_seconds_excluding_model_load": perf_counter() - started,
         },
         "entities": result_groups,
         "highest_rejected_entities": rejected_diagnostics,
-        "gallery": "index.html",
+        "gallery": "index.html" if render_outputs else None,
         "gif": "matches.gif" if rendered else None,
         "contact_sheet": "contact_sheet.jpg" if rendered else None,
     }

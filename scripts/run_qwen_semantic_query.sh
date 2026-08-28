@@ -85,6 +85,7 @@ echo "[2/2] Querying persistent entities"
     --query "$query" \
     --device-map "$device_map" \
     --dtype "$dtype" \
+    --fast \
     --no-map-hard-negatives \
     --min-view-margin -1.0 \
     --min-entity-margin -1.0 \

@@ -84,6 +84,11 @@ def main() -> None:
     parser.add_argument("--max-observations-per-entity", type=int)
     parser.add_argument("--gif-width", type=int, default=1000)
     parser.add_argument("--gif-duration-ms", type=int, default=400)
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="rank only: one positive/negative prompt and no gallery or GIF",
+    )
     args = parser.parse_args()
 
     _, manifest, _ = load_observation_index(args.index)
@@ -110,8 +115,16 @@ def main() -> None:
         encoder=encoder,
         max_entities=args.max_entities,
         top_views=args.entity_top_views,
-        positive_prompts=args.positive_prompt,
-        negative_prompts=args.confounder,
+        positive_prompts=(
+            [args.query]
+            if args.fast and args.positive_prompt is None
+            else args.positive_prompt
+        ),
+        negative_prompts=(
+            ["an unrelated object"]
+            if args.fast and args.confounder is None
+            else args.confounder
+        ),
         confirmed_only=not args.include_unconfirmed,
         include_unanchored_tracks=not args.no_unanchored_tracks,
         min_supporting_views=args.min_supporting_views,
@@ -124,6 +137,7 @@ def main() -> None:
         max_observations_per_entity=args.max_observations_per_entity,
         gif_width=args.gif_width,
         gif_duration_ms=args.gif_duration_ms,
+        render_outputs=not args.fast,
     )
     result = json.loads(result_path.read_text(encoding="utf-8"))
     if result["confident_match_found"]:
@@ -133,6 +147,7 @@ def main() -> None:
                 f"margin={entity['entity_margin']:.3f} "
                 f"support={entity['supporting_view_count']}/"
                 f"{entity['observation_count']} "
+                f"best_frame={entity['best_revisit_view']['frame_id']} "
                 f"frames={len(entity['observations'])}"
             )
     else:
@@ -140,11 +155,16 @@ def main() -> None:
             "No persistent 3D entity or tracked 2D observation passed the "
             "semantic confidence gates."
         )
+    timing = result["timing"]
     print(
-        f"Query took {result['timing']['total_query_seconds_excluding_model_load']:.2f}s "
-        f"after model loading"
+        f"Timing: load={timing['model_load_seconds']:.2f}s, "
+        f"text={timing['text_encoding_seconds']:.2f}s, "
+        f"rank={timing['ranking_seconds']:.2f}s, "
+        f"render={timing['rendering_seconds']:.2f}s, "
+        f"query-total={timing['total_query_seconds_excluding_model_load']:.2f}s"
     )
-    print(f"Open gallery: {output / 'index.html'}")
+    if result["gallery"] is not None:
+        print(f"Open gallery: {output / 'index.html'}")
     if result["gif"] is not None:
         print(f"GIF: {output / str(result['gif'])}")
     print(f"Results: {result_path}")
