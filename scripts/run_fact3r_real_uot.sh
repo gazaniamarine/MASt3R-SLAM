@@ -27,9 +27,11 @@ realtime_preset="false"
 ultra_fast_preset="false"
 high_recall_preset="false"
 low_latency_mapping_preset="false"
+subsecond_mapping_preset="false"
 reuse_propagated_track_embeddings="false"
 mast3r_pair_stride="1"
 propagation_backend="sam2"
+recall_biased_query="false"
 pred_iou_threshold="0.75"
 stability_score_threshold="0.85"
 min_area_pixels="40"
@@ -53,6 +55,7 @@ usage() {
     echo "  --ultra-fast-preset        Tiny discovery/tracking, 24x24 grid (low recall)"
     echo "  --high-recall-preset       Large discovery + Tiny tracking, 64x64 grid"
     echo "  --low-latency-mapping-preset  Large sparse discovery with cached semantics"
+    echo "  --subsecond-mapping-preset  Large 32x32 discovery targeting >1 mapping FPS"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -75,6 +78,7 @@ while [[ $# -gt 0 ]]; do
         --ultra-fast-preset) ultra_fast_preset="true"; shift ;;
         --high-recall-preset) high_recall_preset="true"; shift ;;
         --low-latency-mapping-preset) low_latency_mapping_preset="true"; shift ;;
+        --subsecond-mapping-preset) subsecond_mapping_preset="true"; shift ;;
         --max-seeds-per-batch) max_seeds_per_batch=${2:?}; shift 2 ;;
         --siglip-batch-size) siglip_batch_size=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -87,6 +91,7 @@ if [[ "$realtime_preset" == "true" ]]; then selected_preset_count=$((selected_pr
 if [[ "$ultra_fast_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
 if [[ "$high_recall_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
 if [[ "$low_latency_mapping_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
+if [[ "$subsecond_mapping_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
 if [[ "$selected_preset_count" -gt 1 ]]; then
     echo "Choose only one segmentation preset" >&2
     exit 2
@@ -110,6 +115,29 @@ if [[ "$low_latency_mapping_preset" == "true" ]]; then
     reuse_propagated_track_embeddings="true"
     mast3r_pair_stride="5"
     propagation_backend="optical-flow"
+    recall_biased_query="true"
+fi
+
+if [[ "$subsecond_mapping_preset" == "true" ]]; then
+    # Keep the accurate Large backbone while reducing the quadratic automatic
+    # prompt grid. Optical flow and cached semantics carry evidence between
+    # dense discoveries.
+    sam_discovery_model="facebook/sam2-hiera-large"
+    sam_tracking_model="facebook/sam2.1-hiera-tiny"
+    points_per_side="32"
+    points_per_batch="64"
+    max_seeds_per_batch="64"
+    sam_refresh_seconds="10"
+    pred_iou_threshold="0.70"
+    stability_score_threshold="0.80"
+    min_area_pixels="20"
+    min_area_fraction="0.0001"
+    min_component_pixels="10"
+    siglip_batch_size="128"
+    reuse_propagated_track_embeddings="true"
+    mast3r_pair_stride="10"
+    propagation_backend="optical-flow"
+    recall_biased_query="true"
 fi
 
 if [[ "$high_recall_preset" == "true" ]]; then
@@ -300,11 +328,23 @@ echo "  wall-clock time:      ${overall_seconds}s"
 echo "  effective throughput: $effective_fps processed FPS"
 echo "  real-time factor:     ${realtime_factor}x (>=1.0 keeps up)"
 echo "  stage seconds: frames=$frames_seconds streaming_SAM2=$proposals_seconds SigLIP=$appearance_seconds MASt3R=$matches_seconds UOT=$mapping_seconds attach=$attachment_seconds"
+query_gate_arguments=()
+if [[ "$recall_biased_query" == "true" ]]; then
+    query_gate_arguments+=(
+        --min-entity-margin 0.01
+        --min-view-margin 0.005
+        --min-supporting-views 1
+    )
+fi
 if [[ -n "$query" ]]; then
     "${sam2_python[@]}" fact3r-map/scripts/query_siglip_observations.py \
         --index "$observations" --query "$query" --device "$device" \
-        --no-map-hard-negatives
+        --no-map-hard-negatives "${query_gate_arguments[@]}"
 else
     echo "Query command:"
-    echo "  conda run -n $sam2_environment python3 fact3r-map/scripts/query_siglip_observations.py --index '$observations' --query 'a chair' --device '$device' --no-map-hard-negatives"
+    query_gate_text=""
+    if [[ "$recall_biased_query" == "true" ]]; then
+        query_gate_text=" --min-entity-margin 0.01 --min-view-margin 0.005 --min-supporting-views 1"
+    fi
+    echo "  conda run -n $sam2_environment python3 fact3r-map/scripts/query_siglip_observations.py --index '$observations' --query 'a chair' --device '$device' --no-map-hard-negatives$query_gate_text"
 fi
