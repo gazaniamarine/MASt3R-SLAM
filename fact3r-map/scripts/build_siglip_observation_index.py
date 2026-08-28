@@ -51,6 +51,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--context-fraction", type=float, default=0.15)
     parser.add_argument("--outside-mask-alpha", type=float, default=0.20)
+    parser.add_argument(
+        "--reuse-propagated-track-embeddings",
+        action="store_true",
+        help="encode discovery/new-track crops and reuse them during propagation",
+    )
     args = parser.parse_args()
 
     output = args.output or _default_output(args.proposals, args.mapping)
@@ -66,11 +71,15 @@ def main() -> None:
         batch_size=args.batch_size,
         context_fraction=args.context_fraction,
         outside_mask_alpha=args.outside_mask_alpha,
+        reuse_propagated_track_embeddings=(
+            args.reuse_propagated_track_embeddings
+        ),
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     timing = manifest["timing"]
     print(
-        f"Encoded {manifest['observation_count']} masks from "
+        f"Encoded {manifest.get('encoded_observation_count', manifest['observation_count'])} "
+        f"of {manifest['observation_count']} masks from "
         f"{manifest['frame_count']} frames in "
         f"{timing['image_encoding_seconds']:.2f}s "
         f"({timing['observations_per_encoding_second']:.1f} masks/s); "

@@ -27,7 +27,15 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--subsample", type=int, default=8)
     parser.add_argument("--block-size", type=int, default=8192)
+    parser.add_argument(
+        "--pair-stride",
+        type=int,
+        default=1,
+        help="match every Nth adjacent pair (default: every pair)",
+    )
     args = parser.parse_args()
+    if args.pair_stride <= 0:
+        raise ValueError("pair_stride must be positive")
 
     import torch
     import mast3r.utils.path_to_dust3r  # noqa: F401
@@ -51,6 +59,8 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     pairs: list[dict[str, object]] = []
     for pair_index, (source, target) in enumerate(zip(frames, frames[1:])):
+        if pair_index % args.pair_stride != 0:
+            continue
         paths = [
             str(args.keyframes / source["rgb_file"]),
             str(args.keyframes / target["rgb_file"]),
@@ -107,6 +117,7 @@ def main() -> None:
         "version": 1,
         "source_keyframes": str(args.keyframes.resolve()),
         "weights": str(weights),
+        "pair_stride": args.pair_stride,
         "pairs": pairs,
     }
     path = args.output / "manifest.json"

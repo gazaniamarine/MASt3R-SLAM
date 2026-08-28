@@ -328,8 +328,16 @@ def build_observation_index(
     batch_size: int = 32,
     context_fraction: float = 0.15,
     outside_mask_alpha: float = 0.20,
+    reuse_propagated_track_embeddings: bool = False,
 ) -> Path:
-    """Encode every saved SAM proposal and write a reusable observation index."""
+    """Encode saved SAM proposals and write a reusable observation index.
+
+    When ``reuse_propagated_track_embeddings`` is enabled, observations created
+    by SAM2 video propagation inherit the most recent embedding from the same
+    track. Dense discovery observations and new tracks are still encoded. This
+    keeps the per-frame UOT input complete without repeatedly encoding nearly
+    identical crops between discovery frames.
+    """
 
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -354,6 +362,9 @@ def build_observation_index(
     observations: list[dict[str, object]] = []
     image_batch: list[Image.Image] = []
     embedding_chunks: list[NDArray[np.float32]] = []
+    encoded_observation_indices: list[int] = []
+    embedding_reference_indices: list[int] = []
+    representative_by_track: dict[str, int] = {}
     image_encoding_seconds = 0.0
     indexed_frames = 0
     for keyframe in iter_exported_keyframes(keyframe_directory):
@@ -378,12 +389,6 @@ def build_observation_index(
             proposal_file = frame_manifest_path.parent / str(proposal["file"])
             with np.load(proposal_file, allow_pickle=False) as evidence:
                 mask = np.array(evidence["mask"], dtype=bool, copy=True)
-            crop = masked_context_crop(
-                keyframe.rgb,
-                mask,
-                context_fraction=context_fraction,
-                outside_mask_alpha=outside_mask_alpha,
-            )
             assignment = assignments.get(
                 (keyframe.frame_id, proposal_id),
                 MappingAssignment(None, None, "unassigned"),
@@ -470,18 +475,58 @@ def build_observation_index(
                     "mask_file": str(proposal_file.relative_to(proposal_directory)),
                 }
             )
-            image_batch.append(crop)
-            if len(image_batch) >= batch_size:
-                image_encoding_seconds += _flush_image_batch(
-                    encoder, image_batch, embedding_chunks
+            propagated = str(proposal.get("source", "")) in {
+                "sam2-video-memory",
+                "optical-flow-memory",
+            }
+            reference_index = (
+                representative_by_track.get(track_id)
+                if reuse_propagated_track_embeddings
+                and propagated
+                and track_id is not None
+                else None
+            )
+            if reference_index is None:
+                reference_index = observation_index
+                if track_id is not None:
+                    representative_by_track[track_id] = observation_index
+                crop = masked_context_crop(
+                    keyframe.rgb,
+                    mask,
+                    context_fraction=context_fraction,
+                    outside_mask_alpha=outside_mask_alpha,
                 )
+                image_batch.append(crop)
+                encoded_observation_indices.append(observation_index)
+                if len(image_batch) >= batch_size:
+                    image_encoding_seconds += _flush_image_batch(
+                        encoder, image_batch, embedding_chunks
+                    )
+            embedding_reference_indices.append(reference_index)
+            observations[-1]["embedding_reused_from_observation"] = (
+                None if reference_index == observation_index else reference_index
+            )
 
     image_encoding_seconds += _flush_image_batch(
         encoder, image_batch, embedding_chunks
     )
     if not observations:
         raise ValueError("no common keyframe and proposal observations found")
-    embeddings = np.concatenate(embedding_chunks, axis=0)
+    unique_embeddings = np.concatenate(embedding_chunks, axis=0)
+    if len(unique_embeddings) != len(encoded_observation_indices):
+        raise RuntimeError("encoded observation and embedding counts diverged")
+    encoded_row_by_observation = {
+        observation_index: row
+        for row, observation_index in enumerate(encoded_observation_indices)
+    }
+    try:
+        embedding_rows = [
+            encoded_row_by_observation[reference_index]
+            for reference_index in embedding_reference_indices
+        ]
+    except KeyError as error:
+        raise RuntimeError("track embedding references an unencoded observation") from error
+    embeddings = np.ascontiguousarray(unique_embeddings[embedding_rows])
     if len(embeddings) != len(observations):
         raise RuntimeError("observation and embedding counts diverged")
     np.save(output_directory / "embeddings.npy", embeddings)
@@ -525,7 +570,12 @@ def build_observation_index(
         "crop_config": {
             "context_fraction": context_fraction,
             "outside_mask_alpha": outside_mask_alpha,
+            "reuse_propagated_track_embeddings": reuse_propagated_track_embeddings,
         },
+        "encoded_observation_count": len(encoded_observation_indices),
+        "reused_embedding_count": (
+            len(observations) - len(encoded_observation_indices)
+        ),
         "timing": {
             "model_load_seconds": float(encoder.load_seconds),
             "image_encoding_seconds": image_encoding_seconds,
@@ -533,7 +583,7 @@ def build_observation_index(
             "observations_per_encoding_second": (
                 0.0
                 if image_encoding_seconds <= 0.0
-                else len(observations) / image_encoding_seconds
+                else len(encoded_observation_indices) / image_encoding_seconds
             ),
         },
         "observations": observations,

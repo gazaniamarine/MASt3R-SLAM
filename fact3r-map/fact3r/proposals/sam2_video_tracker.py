@@ -96,30 +96,49 @@ class SAM2OfficialVideoTracker:
         propagated: list[NDArray[np.bool_] | None] = [None] * len(masks)
         target_frame_index = source_frame_index + 1
 
-        for batch_start in range(0, len(masks), max_seeds_per_batch):
-            batch_stop = min(batch_start + max_seeds_per_batch, len(masks))
-            self._predictor.reset_state(inference_state)
-            with self._inference_context():
-                for local_index, mask in enumerate(
-                    masks[batch_start:batch_stop]
-                ):
-                    self._predictor.add_new_mask(
+        batch_start = 0
+        batch_size = min(max_seeds_per_batch, len(masks))
+        while batch_start < len(masks):
+            batch_stop = min(batch_start + batch_size, len(masks))
+            try:
+                self._predictor.reset_state(inference_state)
+                with self._inference_context():
+                    for local_index, mask in enumerate(
+                        masks[batch_start:batch_stop]
+                    ):
+                        self._predictor.add_new_mask(
+                            inference_state=inference_state,
+                            frame_idx=source_frame_index,
+                            obj_id=local_index,
+                            mask=mask,
+                        )
+                    outputs = self._predictor.propagate_in_video(
                         inference_state=inference_state,
-                        frame_idx=source_frame_index,
-                        obj_id=local_index,
-                        mask=mask,
+                        start_frame_idx=source_frame_index,
+                        max_frame_num_to_track=1,
+                        reverse=False,
                     )
-                outputs = self._predictor.propagate_in_video(
-                    inference_state=inference_state,
-                    start_frame_idx=source_frame_index,
-                    max_frame_num_to_track=1,
-                    reverse=False,
+                    target_output = None
+                    for frame_index, object_ids, mask_logits in outputs:
+                        if int(frame_index) == target_frame_index:
+                            target_output = (object_ids, mask_logits)
+                            break
+            except RuntimeError as error:
+                if "out of memory" not in str(error).lower() or batch_size == 1:
+                    raise
+                batch_size = max(1, batch_size // 2)
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+                print(
+                    "SAM2 propagation exceeded GPU memory; retrying with "
+                    f"{batch_size} seeds per batch"
                 )
-                target_output = None
-                for frame_index, object_ids, mask_logits in outputs:
-                    if int(frame_index) == target_frame_index:
-                        target_output = (object_ids, mask_logits)
-                        break
+                continue
             if target_output is None:
                 raise RuntimeError(
                     f"SAM2 did not return target keyframe index {target_frame_index}"
@@ -140,6 +159,7 @@ class SAM2OfficialVideoTracker:
                 propagated[source_index] = np.ascontiguousarray(
                     logits[output_index] > 0.0
                 )
+            batch_start = batch_stop
 
         if any(mask is None for mask in propagated):
             raise RuntimeError("SAM2 omitted one or more propagated objects")

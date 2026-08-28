@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
@@ -64,6 +65,7 @@ def _propagated_proposals(
     *,
     frame_id: int,
     config: MaskFilterConfig,
+    source_name: str = "sam2-video-memory",
 ) -> tuple[GeneratedProposal, ...]:
     raw = [
         MaskProposal2D(
@@ -72,7 +74,7 @@ def _propagated_proposals(
             mask=mask,
             score=max(config.min_score, source.mask_2d.score * 0.995),
             bounding_box_xyxy=_box(mask),
-            source="sam2-video-memory",
+            source=source_name,
             metadata={"source_proposal_id": source.mask_2d.proposal_id},
         )
         for index, (mask, source) in enumerate(zip(masks, sources))
@@ -96,6 +98,53 @@ def _propagated_proposals(
     )
 
 
+def _optical_flow_propagate(
+    source_rgb: object,
+    target_rgb: object,
+    masks: tuple[np.ndarray, ...],
+) -> tuple[np.ndarray, ...]:
+    """Warp every source mask with one shared backward optical-flow field."""
+
+    if not masks:
+        return ()
+    try:
+        import cv2
+    except ImportError as error:
+        raise ImportError(
+            "optical-flow propagation requires opencv-python in the SAM2 environment"
+        ) from error
+    source = _rgb_uint8(source_rgb)
+    target = _rgb_uint8(target_rgb)
+    if source.shape != target.shape:
+        raise ValueError("optical-flow frames must share one image shape")
+    source_gray = cv2.cvtColor(source, cv2.COLOR_RGB2GRAY)
+    target_gray = cv2.cvtColor(target, cv2.COLOR_RGB2GRAY)
+    estimator = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+    # Backward flow tells each target pixel where to sample the source mask.
+    flow = estimator.calc(target_gray, source_gray, None)
+    height, width = source_gray.shape
+    columns, rows = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+    map_x = np.ascontiguousarray(columns + flow[..., 0], dtype=np.float32)
+    map_y = np.ascontiguousarray(rows + flow[..., 1], dtype=np.float32)
+    return tuple(
+        np.ascontiguousarray(
+            cv2.remap(
+                np.asarray(mask, dtype=np.uint8),
+                map_x,
+                map_y,
+                interpolation=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            > 0
+        )
+        for mask in masks
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyframes", type=Path, required=True)
@@ -108,6 +157,12 @@ def main() -> None:
     parser.add_argument("--points-per-side", type=int, default=64)
     parser.add_argument("--points-per-batch", type=int, default=32)
     parser.add_argument("--max-seeds-per-batch", type=int, default=16)
+    parser.add_argument(
+        "--propagation-backend",
+        choices=("sam2", "optical-flow"),
+        default="sam2",
+        help="SAM2 video memory or one shared DIS optical-flow warp",
+    )
     parser.add_argument("--min-link-iou", type=float, default=0.30)
     parser.add_argument("--pred-iou-threshold", type=float, default=0.75)
     parser.add_argument("--stability-score-threshold", type=float, default=0.85)
@@ -119,6 +174,14 @@ def main() -> None:
     args = parser.parse_args()
     if args.refresh_frames <= 0:
         raise ValueError("refresh_frames must be positive")
+    if args.propagation_backend == "optical-flow":
+        try:
+            import cv2  # noqa: F401
+        except ImportError as error:
+            raise ImportError(
+                "--propagation-backend optical-flow requires opencv-python "
+                "in the SAM2 environment"
+            ) from error
 
     keyframes = tuple(iter_exported_keyframes(args.keyframes))
     if not keyframes:
@@ -146,7 +209,11 @@ def main() -> None:
         pred_iou_threshold=args.pred_iou_threshold,
         stability_score_threshold=args.stability_score_threshold,
     )
-    tracker = SAM2OfficialVideoTracker(args.tracking_model, device=args.device)
+    tracker = (
+        SAM2OfficialVideoTracker(args.tracking_model, device=args.device)
+        if args.propagation_backend == "sam2"
+        else None
+    )
 
     proposal_summaries: list[dict[str, object]] = []
     tracklet_frames: list[dict[str, object]] = []
@@ -156,32 +223,49 @@ def main() -> None:
     discovery_seconds = 0.0
     propagation_seconds = 0.0
 
-    with tempfile.TemporaryDirectory(prefix="fact3r_streaming_sam2_") as temporary:
-        video_directory = Path(temporary)
-        for index, keyframe in enumerate(keyframes):
-            Image.fromarray(_rgb_uint8(keyframe.rgb)).save(
-                video_directory / f"{index:06d}.jpg", quality=95, subsampling=0
+    temporary_context = (
+        tempfile.TemporaryDirectory(prefix="fact3r_streaming_sam2_")
+        if tracker is not None
+        else nullcontext(None)
+    )
+    with temporary_context as temporary:
+        if tracker is not None:
+            video_directory = Path(str(temporary))
+            for index, keyframe in enumerate(keyframes):
+                Image.fromarray(_rgb_uint8(keyframe.rgb)).save(
+                    video_directory / f"{index:06d}.jpg", quality=95, subsampling=0
+                )
+            state = tracker.initialize(
+                str(video_directory),
+                offload_video_to_cpu=True,
+                offload_state_to_cpu=args.offload_state_to_cpu,
             )
-        state = tracker.initialize(
-            str(video_directory),
-            offload_video_to_cpu=True,
-            offload_state_to_cpu=args.offload_state_to_cpu,
-        )
+        else:
+            state = None
 
         source_generated: tuple[GeneratedProposal, ...] = ()
         source_tracks: dict[str, str] = {}
+        source_rgb: object | None = None
         for frame_index, keyframe in enumerate(keyframes):
             propagated_masks: tuple[np.ndarray, ...] = ()
             if frame_index > 0 and source_generated:
                 stage_started = perf_counter()
-                propagated_masks = tracker.propagate_one_step(
-                    state,
-                    source_frame_index=frame_index - 1,
-                    source_masks=tuple(
-                        item.mask_2d.mask for item in source_generated
-                    ),
-                    max_seeds_per_batch=args.max_seeds_per_batch,
+                source_masks = tuple(
+                    item.mask_2d.mask for item in source_generated
                 )
+                if tracker is None:
+                    if source_rgb is None:
+                        raise RuntimeError("missing source RGB for optical flow")
+                    propagated_masks = _optical_flow_propagate(
+                        source_rgb, keyframe.rgb, source_masks
+                    )
+                else:
+                    propagated_masks = tracker.propagate_one_step(
+                        state,
+                        source_frame_index=frame_index - 1,
+                        source_masks=source_masks,
+                        max_seeds_per_batch=args.max_seeds_per_batch,
+                    )
                 propagation_seconds += perf_counter() - stage_started
 
             refresh = frame_index == 0 or frame_index % args.refresh_frames == 0
@@ -198,6 +282,11 @@ def main() -> None:
                     source_generated,
                     frame_id=keyframe.frame_id,
                     config=filter_config,
+                    source_name=(
+                        "sam2-video-memory"
+                        if tracker is not None
+                        else "optical-flow-memory"
+                    ),
                 )
 
             target_ids = tuple(item.mask_2d.proposal_id for item in target_generated)
@@ -256,6 +345,7 @@ def main() -> None:
             )
             source_generated = target_generated
             source_tracks = target_tracks
+            source_rgb = keyframe.rgb
 
     proposal_manifest = {
         "format": "fact3r-sam2-proposals",
@@ -263,6 +353,7 @@ def main() -> None:
         "backend": "official-streaming",
         "model": args.discovery_model,
         "tracking_model": args.tracking_model,
+        "propagation_backend": args.propagation_backend,
         "keyframe_export": str(args.keyframes.resolve()),
         "refresh_frames": args.refresh_frames,
         "filter_config": {
@@ -300,7 +391,12 @@ def main() -> None:
         "version": TRACKLET_VERSION,
         "source_proposals": str(args.proposals_output.resolve()),
         "keyframe_export": str(args.keyframes.resolve()),
-        "model": args.tracking_model,
+        "model": (
+            args.tracking_model
+            if args.propagation_backend == "sam2"
+            else "opencv-dis-fast"
+        ),
+        "propagation_backend": args.propagation_backend,
         "min_link_iou": args.min_link_iou,
         "max_seeds_per_batch": args.max_seeds_per_batch,
         "frame_count": len(tracklet_frames),

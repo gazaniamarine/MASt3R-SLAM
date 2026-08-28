@@ -26,6 +26,10 @@ sam_tracking_model="facebook/sam2-hiera-small"
 realtime_preset="false"
 ultra_fast_preset="false"
 high_recall_preset="false"
+low_latency_mapping_preset="false"
+reuse_propagated_track_embeddings="false"
+mast3r_pair_stride="1"
+propagation_backend="sam2"
 pred_iou_threshold="0.75"
 stability_score_threshold="0.85"
 min_area_pixels="40"
@@ -48,6 +52,7 @@ usage() {
     echo "  --realtime-preset          Small discovery + Tiny tracking, 48x48 grid"
     echo "  --ultra-fast-preset        Tiny discovery/tracking, 24x24 grid (low recall)"
     echo "  --high-recall-preset       Large discovery + Tiny tracking, 64x64 grid"
+    echo "  --low-latency-mapping-preset  Large sparse discovery with cached semantics"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -69,6 +74,7 @@ while [[ $# -gt 0 ]]; do
         --realtime-preset) realtime_preset="true"; shift ;;
         --ultra-fast-preset) ultra_fast_preset="true"; shift ;;
         --high-recall-preset) high_recall_preset="true"; shift ;;
+        --low-latency-mapping-preset) low_latency_mapping_preset="true"; shift ;;
         --max-seeds-per-batch) max_seeds_per_batch=${2:?}; shift 2 ;;
         --siglip-batch-size) siglip_batch_size=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -80,9 +86,30 @@ selected_preset_count=0
 if [[ "$realtime_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
 if [[ "$ultra_fast_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
 if [[ "$high_recall_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
+if [[ "$low_latency_mapping_preset" == "true" ]]; then selected_preset_count=$((selected_preset_count + 1)); fi
 if [[ "$selected_preset_count" -gt 1 ]]; then
     echo "Choose only one segmentation preset" >&2
     exit 2
+fi
+
+if [[ "$low_latency_mapping_preset" == "true" ]]; then
+    # Retain the high-recall discovery model, but amortise it and avoid
+    # re-running expensive visual encoders for unchanged track observations.
+    sam_discovery_model="facebook/sam2-hiera-large"
+    sam_tracking_model="facebook/sam2.1-hiera-tiny"
+    points_per_side="64"
+    points_per_batch="64"
+    max_seeds_per_batch="64"
+    sam_refresh_seconds="10"
+    pred_iou_threshold="0.70"
+    stability_score_threshold="0.80"
+    min_area_pixels="20"
+    min_area_fraction="0.0001"
+    min_component_pixels="10"
+    siglip_batch_size="128"
+    reuse_propagated_track_embeddings="true"
+    mast3r_pair_stride="5"
+    propagation_backend="optical-flow"
 fi
 
 if [[ "$high_recall_preset" == "true" ]]; then
@@ -196,6 +223,7 @@ if [[ ! -f "$proposals/manifest.json" || ! -f "$tracklets/manifest.json" ]]; the
         --points-per-side "$points_per_side" \
         --points-per-batch "$points_per_batch" \
         --max-seeds-per-batch "$max_seeds_per_batch" \
+        --propagation-backend "$propagation_backend" \
         --pred-iou-threshold "$pred_iou_threshold" \
         --stability-score-threshold "$stability_score_threshold" \
         --min-area-pixels "$min_area_pixels" \
@@ -209,10 +237,14 @@ fi
 if [[ ! -f "$appearance/manifest.json" ]]; then
     echo "[4/7] Encoding mask observations with SigLIP"
     stage_start=$SECONDS
-    "${sam2_python[@]}" fact3r-map/scripts/build_siglip_observation_index.py \
+    siglip_command=("${sam2_python[@]}" fact3r-map/scripts/build_siglip_observation_index.py
         --keyframes "$frames" --proposals "$proposals" --tracklets "$tracklets" \
         --output "$appearance" --device "$device" --batch-size "$siglip_batch_size" \
-        --context-fraction 0.02 --outside-mask-alpha 0.0
+        --context-fraction 0.02 --outside-mask-alpha 0.0)
+    if [[ "$reuse_propagated_track_embeddings" == "true" ]]; then
+        siglip_command+=(--reuse-propagated-track-embeddings)
+    fi
+    "${siglip_command[@]}"
     appearance_seconds=$((SECONDS - stage_start))
 else
     echo "[4/7] Reusing SigLIP observations"
@@ -222,7 +254,8 @@ if [[ ! -f "$matches/manifest.json" ]]; then
     echo "[5/7] Computing adjacent-frame MASt3R reciprocal feature matches"
     stage_start=$SECONDS
     "${mast3r_python[@]}" fact3r-map/scripts/build_mast3r_pair_matches.py \
-        --keyframes "$frames" --output "$matches" --device "cuda:$device"
+        --keyframes "$frames" --output "$matches" --device "cuda:$device" \
+        --pair-stride "$mast3r_pair_stride"
     matches_seconds=$((SECONDS - stage_start))
 else
     echo "[5/7] Reusing MASt3R pair matches"

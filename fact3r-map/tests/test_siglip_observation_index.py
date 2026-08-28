@@ -244,6 +244,73 @@ def _write_mapping(directory: Path) -> None:
 
 
 class SiglipObservationIndexTests(unittest.TestCase):
+    def test_propagated_tracks_reuse_discovery_embeddings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            keyframes = root / "keyframes"
+            proposals = root / "proposals"
+            tracklets = root / "tracklets"
+            index = root / "index"
+            _write_keyframes(keyframes)
+            _write_proposals(proposals)
+            second_manifest_path = proposals / "frame_000001/manifest.json"
+            second_manifest = json.loads(
+                second_manifest_path.read_text(encoding="utf-8")
+            )
+            for proposal in second_manifest["proposals"]:
+                proposal["source"] = "sam2-video-memory"
+            second_manifest_path.write_text(
+                json.dumps(second_manifest), encoding="utf-8"
+            )
+            tracklets.mkdir()
+            tracklet_frames = []
+            for frame_id in (0, 1):
+                observations = []
+                for colour in ("red", "blue"):
+                    observations.append(
+                        {
+                            "proposal_id": f"{colour}-{frame_id}",
+                            "track_id": f"track-{colour}",
+                            "source_proposal_id": (
+                                None if frame_id == 0 else f"{colour}-0"
+                            ),
+                            "link_iou": None if frame_id == 0 else 0.9,
+                        }
+                    )
+                tracklet_frames.append(
+                    {"frame_id": frame_id, "observations": observations}
+                )
+            (tracklets / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "format": "fact3r-sam2-tracklets",
+                        "version": 1,
+                        "source_proposals": str(proposals.resolve()),
+                        "model": "test",
+                        "frames": tracklet_frames,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest_path = build_observation_index(
+                keyframes=keyframes,
+                proposals=proposals,
+                tracklets=tracklets,
+                output=index,
+                encoder=_ColourEncoder(),
+                batch_size=2,
+                context_fraction=0.0,
+                outside_mask_alpha=0.0,
+                reuse_propagated_track_embeddings=True,
+            )
+            _, manifest, embeddings = load_observation_index(manifest_path)
+            self.assertEqual(manifest["observation_count"], 4)
+            self.assertEqual(manifest["encoded_observation_count"], 2)
+            self.assertEqual(manifest["reused_embedding_count"], 2)
+            self.assertTrue(np.allclose(embeddings[0], embeddings[2]))
+            self.assertTrue(np.allclose(embeddings[1], embeddings[3]))
+
     def test_pathological_border_sliver_rejects_edge_strip_only(self) -> None:
         strip = np.zeros((480, 640), dtype=bool)
         strip[:, 625:639] = True
