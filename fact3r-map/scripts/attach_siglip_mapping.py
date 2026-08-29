@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attach final persistent identities to a pre-UOT SigLIP index."""
+"""Attach final persistent identities to a pre-UOT semantic index."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def main() -> None:
         f"Retained {manifest.get('track_only_observation_count', 0)} "
         "observations as searchable 2D-only tracks"
     )
-    print(f"Wrote mapped SigLIP observation index to {manifest_path}")
+    print(f"Wrote mapped semantic observation index to {manifest_path}")
 
 
 if __name__ == "__main__":

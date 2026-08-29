@@ -20,6 +20,9 @@ points_per_side="64"
 points_per_batch="32"
 max_seeds_per_batch="16"
 siglip_batch_size="32"
+qwen_batch_size="8"
+qwen_model="Qwen/Qwen3-VL-Embedding-2B"
+semantic_backend="siglip"
 sam_refresh_seconds="5"
 sam_discovery_model="facebook/sam2-hiera-large"
 sam_tracking_model="facebook/sam2-hiera-small"
@@ -56,6 +59,8 @@ usage() {
     echo "  --high-recall-preset       Large discovery + Tiny tracking, 64x64 grid"
     echo "  --low-latency-mapping-preset  Large sparse discovery with cached semantics"
     echo "  --subsecond-mapping-preset  Large 32x32 discovery targeting >1 mapping FPS"
+    echo "  --qwen-semantic           replace SigLIP with Qwen3-VL-Embedding throughout"
+    echo "  --qwen-batch-size N       Qwen mask-embedding batch (default: 8)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -79,6 +84,9 @@ while [[ $# -gt 0 ]]; do
         --high-recall-preset) high_recall_preset="true"; shift ;;
         --low-latency-mapping-preset) low_latency_mapping_preset="true"; shift ;;
         --subsecond-mapping-preset) subsecond_mapping_preset="true"; shift ;;
+        --qwen-semantic) semantic_backend="qwen"; shift ;;
+        --qwen-model) qwen_model=${2:?}; shift 2 ;;
+        --qwen-batch-size) qwen_batch_size=${2:?}; shift 2 ;;
         --max-seeds-per-batch) max_seeds_per_batch=${2:?}; shift 2 ;;
         --siglip-batch-size) siglip_batch_size=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -208,10 +216,16 @@ sam2_python=(conda run -n "$sam2_environment" python3)
 frames="$output/frames"
 proposals="$output/sam2_proposals"
 tracklets="$output/sam2_tracklets"
-appearance="$output/siglip_pre_uot"
+if [[ "$semantic_backend" == "qwen" ]]; then
+    appearance="$output/qwen_pre_uot"
+    mapping="$output/image_uot_qwen"
+    observations="$output/qwen_semantic_observations"
+else
+    appearance="$output/siglip_pre_uot"
+    mapping="$output/image_uot"
+    observations="$output/siglip_observations"
+fi
 matches="$output/mast3r_pair_matches"
-mapping="$output/image_uot"
-observations="$output/siglip_observations"
 mkdir -p "$output"
 cd "$repository_root"
 refresh_frames=$(awk -v fps="$sample_fps" -v seconds="$sam_refresh_seconds" 'BEGIN {value=int(fps*seconds+0.5); if (value < 1) value=1; print value}')
@@ -263,19 +277,29 @@ else
 fi
 
 if [[ ! -f "$appearance/manifest.json" ]]; then
-    echo "[4/7] Encoding mask observations with SigLIP"
+    echo "[4/7] Encoding mask observations with $semantic_backend"
     stage_start=$SECONDS
-    siglip_command=("${sam2_python[@]}" fact3r-map/scripts/build_siglip_observation_index.py
-        --keyframes "$frames" --proposals "$proposals" --tracklets "$tracklets" \
-        --output "$appearance" --device "$device" --batch-size "$siglip_batch_size" \
-        --context-fraction 0.02 --outside-mask-alpha 0.0)
-    if [[ "$reuse_propagated_track_embeddings" == "true" ]]; then
-        siglip_command+=(--reuse-propagated-track-embeddings)
+    if [[ "$semantic_backend" == "qwen" ]]; then
+        semantic_command=("${sam2_python[@]}"
+            fact3r-map/scripts/build_qwen_embedding_observation_index.py
+            --keyframes "$frames" --proposals "$proposals" --tracklets "$tracklets"
+            --output "$appearance" --model "$qwen_model"
+            --device-map auto --dtype bfloat16 --batch-size "$qwen_batch_size"
+            --context-fraction 0.02 --outside-mask-alpha 0.0)
+    else
+        semantic_command=("${sam2_python[@]}"
+            fact3r-map/scripts/build_siglip_observation_index.py
+            --keyframes "$frames" --proposals "$proposals" --tracklets "$tracklets"
+            --output "$appearance" --device "$device" --batch-size "$siglip_batch_size"
+            --context-fraction 0.02 --outside-mask-alpha 0.0)
     fi
-    "${siglip_command[@]}"
+    if [[ "$reuse_propagated_track_embeddings" == "true" ]]; then
+        semantic_command+=(--reuse-propagated-track-embeddings)
+    fi
+    "${semantic_command[@]}"
     appearance_seconds=$((SECONDS - stage_start))
 else
-    echo "[4/7] Reusing SigLIP observations"
+    echo "[4/7] Reusing $semantic_backend observations"
 fi
 
 if [[ ! -f "$matches/manifest.json" ]]; then
@@ -327,7 +351,8 @@ echo "  sampled frames:       $frame_count"
 echo "  wall-clock time:      ${overall_seconds}s"
 echo "  effective throughput: $effective_fps processed FPS"
 echo "  real-time factor:     ${realtime_factor}x (>=1.0 keeps up)"
-echo "  stage seconds: frames=$frames_seconds streaming_SAM2=$proposals_seconds SigLIP=$appearance_seconds MASt3R=$matches_seconds UOT=$mapping_seconds attach=$attachment_seconds"
+echo "  semantic backend:     $semantic_backend"
+echo "  stage seconds: frames=$frames_seconds streaming_SAM2=$proposals_seconds Semantics=$appearance_seconds MASt3R=$matches_seconds UOT=$mapping_seconds attach=$attachment_seconds"
 query_gate_arguments=()
 if [[ "$recall_biased_query" == "true" ]]; then
     query_gate_arguments+=(
@@ -337,14 +362,24 @@ if [[ "$recall_biased_query" == "true" ]]; then
     )
 fi
 if [[ -n "$query" ]]; then
-    "${sam2_python[@]}" fact3r-map/scripts/query_siglip_observations.py \
-        --index "$observations" --query "$query" --device "$device" \
-        --no-map-hard-negatives "${query_gate_arguments[@]}"
+    if [[ "$semantic_backend" == "qwen" ]]; then
+        "${sam2_python[@]}" fact3r-map/scripts/query_qwen_memory_live.py \
+            --index "$observations" --query "$query" --device-map auto \
+            --dtype bfloat16 --top-k 20
+    else
+        "${sam2_python[@]}" fact3r-map/scripts/query_siglip_observations.py \
+            --index "$observations" --query "$query" --device "$device" \
+            --no-map-hard-negatives "${query_gate_arguments[@]}"
+    fi
 else
     echo "Query command:"
-    query_gate_text=""
-    if [[ "$recall_biased_query" == "true" ]]; then
-        query_gate_text=" --min-entity-margin 0.01 --min-view-margin 0.005 --min-supporting-views 1"
+    if [[ "$semantic_backend" == "qwen" ]]; then
+        echo "  conda run -n $sam2_environment python3 fact3r-map/scripts/query_qwen_memory_live.py --index '$observations' --device-map auto --dtype bfloat16 --top-k 50"
+    else
+        query_gate_text=""
+        if [[ "$recall_biased_query" == "true" ]]; then
+            query_gate_text=" --min-entity-margin 0.01 --min-view-margin 0.005 --min-supporting-views 1"
+        fi
+        echo "  conda run -n $sam2_environment python3 fact3r-map/scripts/query_siglip_observations.py --index '$observations' --query 'a chair' --device '$device' --no-map-hard-negatives$query_gate_text"
     fi
-    echo "  conda run -n $sam2_environment python3 fact3r-map/scripts/query_siglip_observations.py --index '$observations' --query 'a chair' --device '$device' --no-map-hard-negatives$query_gate_text"
 fi

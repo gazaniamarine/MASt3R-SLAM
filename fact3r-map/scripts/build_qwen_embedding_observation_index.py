@@ -21,7 +21,11 @@ def main() -> None:
     parser.add_argument("--keyframes", type=Path, required=True)
     parser.add_argument("--proposals", type=Path, required=True)
     parser.add_argument("--tracklets", type=Path, required=True)
-    parser.add_argument("--mapping", type=Path, required=True)
+    parser.add_argument(
+        "--mapping",
+        type=Path,
+        help="optional final mapping; omit when building pre-UOT appearance evidence",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", default="Qwen/Qwen3-VL-Embedding-2B")
     parser.add_argument("--device-map", default="auto")
@@ -36,6 +40,11 @@ def main() -> None:
     parser.add_argument("--attention-implementation")
     parser.add_argument("--context-fraction", type=float, default=0.05)
     parser.add_argument("--outside-mask-alpha", type=float, default=0.0)
+    parser.add_argument(
+        "--reuse-propagated-track-embeddings",
+        action="store_true",
+        help="encode discovery/new-track crops and reuse them during propagation",
+    )
     args = parser.parse_args()
 
     print(f"Loading semantic retriever {args.model} (no generation)...")
@@ -57,11 +66,15 @@ def main() -> None:
         batch_size=args.batch_size,
         context_fraction=args.context_fraction,
         outside_mask_alpha=args.outside_mask_alpha,
+        reuse_propagated_track_embeddings=(
+            args.reuse_propagated_track_embeddings
+        ),
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     timing = manifest["timing"]
     print(
-        f"Encoded {manifest['observation_count']} masks in "
+        f"Encoded {manifest.get('encoded_observation_count', manifest['observation_count'])} "
+        f"of {manifest['observation_count']} masks in "
         f"{timing['image_encoding_seconds']:.2f}s "
         f"({timing['observations_per_encoding_second']:.1f} masks/s); "
         f"load={timing['model_load_seconds']:.2f}s"
