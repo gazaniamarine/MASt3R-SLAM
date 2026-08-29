@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import sys
+from time import perf_counter
 
 import numpy as np
 
@@ -67,7 +68,34 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-track-gap", type=int, default=3)
     parser.add_argument("--max-match-cost", type=float, default=0.70)
+    parser.add_argument(
+        "--cues",
+        default="appearance,sam2,mast3r",
+        help=(
+            "comma-separated association cues; appearance is required and "
+            "sam2/mast3r may be ablated"
+        ),
+    )
     args = parser.parse_args()
+    requested_cues = tuple(
+        value.strip().lower() for value in args.cues.split(",") if value.strip()
+    )
+    unknown_cues = set(requested_cues) - {"appearance", "sam2", "mast3r"}
+    if unknown_cues:
+        raise ValueError(f"unsupported association cues: {sorted(unknown_cues)}")
+    if "appearance" not in requested_cues:
+        raise ValueError("image UOT ablations currently require the appearance cue")
+    enabled_cues = tuple(
+        cue for cue in ("appearance", "sam2", "mast3r") if cue in requested_cues
+    )
+    cue_weights = {
+        "appearance": 0.20,
+        "sam2": 0.35 if "sam2" in enabled_cues else 0.0,
+        "mast3r": 0.45 if "mast3r" in enabled_cues else 0.0,
+    }
+    min_sam2_iou = 0.20 if "sam2" in enabled_cues else float("inf")
+    min_mast3r_support = 0.08 if "mast3r" in enabled_cues else float("inf")
+    started = perf_counter()
 
     proposal_run = json.loads(
         (args.proposals / "manifest.json").read_text(encoding="utf-8")
@@ -129,6 +157,11 @@ def main() -> None:
             pair_source_frame_id=previous_frame_id,
             source_xy=source_xy,
             target_xy=target_xy,
+            appearance_weight=cue_weights["appearance"],
+            sam2_weight=cue_weights["sam2"],
+            mast3r_weight=cue_weights["mast3r"],
+            min_sam2_iou=min_sam2_iou,
+            min_mast3r_support=min_mast3r_support,
             max_track_gap=args.max_track_gap,
         )
         visibility = tuple(
@@ -276,6 +309,7 @@ def main() -> None:
             f"uot_matches={len(frame_matches)} births={len(unmatched)}"
         )
 
+    elapsed_seconds = perf_counter() - started
     manifest = {
         "format": "fact3r-visibility-residual-transport",
         "version": 1,
@@ -284,10 +318,30 @@ def main() -> None:
         "source_tracklets": str((args.tracklets / "manifest.json").resolve()),
         "source_appearance_index": str((args.appearance_index / "manifest.json").resolve()),
         "source_mast3r_pair_matches": str((args.mast3r_matches / "manifest.json").resolve()),
+        "appearance_model": appearance_manifest.get("model"),
+        "association_cues": list(enabled_cues),
+        "association_config": {
+            "cue_weights": cue_weights,
+            "min_sam2_iou": None if not np.isfinite(min_sam2_iou) else min_sam2_iou,
+            "min_mast3r_support": (
+                None
+                if not np.isfinite(min_mast3r_support)
+                else min_mast3r_support
+            ),
+            "min_reidentification_similarity": 0.80,
+            "max_track_gap": args.max_track_gap,
+            "max_match_cost": args.max_match_cost,
+        },
         "entity_count": len(tracks),
         "matched_total": total_matches,
         "created_total": total_births,
         "committed_track_entities": committed_track_entities,
+        "timing": {
+            "total_seconds": elapsed_seconds,
+            "frames_per_second": (
+                len(frames_output) / elapsed_seconds if elapsed_seconds > 0 else None
+            ),
+        },
         "frames": frames_output,
     }
     path = args.output / "manifest.json"

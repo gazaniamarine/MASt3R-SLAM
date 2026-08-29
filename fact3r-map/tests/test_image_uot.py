@@ -77,6 +77,36 @@ class ImageUOTTests(unittest.TestCase):
         self.assertFalse(matrix.candidate_mask[0, 0])
         self.assertTrue(np.isinf(matrix.costs[0, 0]))
 
+    def test_disabled_temporal_cues_do_not_contribute(self) -> None:
+        mask = np.ones((5, 5), dtype=bool)
+        coordinates = np.asarray([[1, 1], [2, 2]], dtype=np.int32)
+        track = ImageTrackEvidence(
+            entity_id="entity-0",
+            last_frame_id=1,
+            last_proposal_id="old",
+            prototype=np.asarray([1.0, 0.0]),
+            last_mask=mask,
+        )
+        matrix = build_image_uot_cost_matrix(
+            ["new"],
+            [mask],
+            np.asarray([[0.0, 1.0]]),
+            ["old"],
+            [1.0],
+            [track],
+            frame_id=2,
+            pair_source_frame_id=1,
+            source_xy=coordinates,
+            target_xy=coordinates,
+            sam2_weight=0.0,
+            mast3r_weight=0.0,
+            min_sam2_iou=float("inf"),
+            min_mast3r_support=float("inf"),
+        )
+        self.assertFalse(matrix.candidate_mask[0, 0])
+        self.assertEqual(matrix.components["sam2_link_iou"][0, 0], 0.0)
+        self.assertEqual(matrix.components["mast3r_mask_support"][0, 0], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

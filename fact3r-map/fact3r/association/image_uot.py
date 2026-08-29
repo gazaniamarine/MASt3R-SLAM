@@ -70,6 +70,8 @@ def build_image_uot_cost_matrix(
     mast3r = np.zeros(shape, dtype=np.float64)
     costs = np.full(shape, np.inf, dtype=np.float64)
     candidates = np.zeros(shape, dtype=bool)
+    sam2_enabled = sam2_weight > 0.0 or np.isfinite(min_sam2_iou)
+    mast3r_enabled = mast3r_weight > 0.0 or np.isfinite(min_mast3r_support)
     for proposal_index, proposal_id in enumerate(proposal_ids):
         for track_index, track in enumerate(tracks):
             gap = frame_id - track.last_frame_id
@@ -80,12 +82,13 @@ def build_image_uot_cost_matrix(
             cosine = float(np.clip(proposal_vectors[proposal_index] @ prototype, -1, 1))
             appearance[proposal_index, track_index] = (cosine + 1.0) / 2.0
             source_id = proposal_source_ids[proposal_index]
-            if source_id == track.last_proposal_id:
+            if sam2_enabled and source_id == track.last_proposal_id:
                 sam2[proposal_index, track_index] = float(
                     proposal_link_ious[proposal_index] or 0.0
                 )
             if (
-                gap == 1
+                mast3r_enabled
+                and gap == 1
                 and pair_source_frame_id == track.last_frame_id
                 and source_xy is not None
                 and target_xy is not None
