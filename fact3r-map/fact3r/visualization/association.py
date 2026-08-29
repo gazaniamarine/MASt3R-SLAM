@@ -36,6 +36,9 @@ class DisplayFrame:
 def display_frame_from_manifest(entry: Mapping[str, object]) -> DisplayFrame:
     """Normalize Hungarian or Sinkhorn frame JSON for rendering."""
 
+    uot = entry.get("uot", {})
+    if not isinstance(uot, Mapping):
+        uot = {}
     assignments = [
         DisplayAssignment(
             proposal_id=str(match["proposal_id"]),
@@ -75,31 +78,46 @@ def display_frame_from_manifest(entry: Mapping[str, object]) -> DisplayFrame:
                     status="held",
                 )
             )
+    created_count = sum(item.status == "created" for item in assignments)
+    visible_entity_count = len(
+        {
+            item.entity_id
+            for item in assignments
+            if item.status not in {"pending"}
+        }
+    )
+    reason_payload = entry.get(
+        "unmatched_reason_counts", uot.get("unmatched_reason_counts", {})
+    )
+    converged = entry.get("converged", uot.get("converged"))
+    iterations = entry.get("iterations", uot.get("iterations"))
+    forbidden = entry.get(
+        "noncandidate_mass",
+        entry.get(
+            "forbidden_mass",
+            uot.get("noncandidate_mass", uot.get("forbidden_mass")),
+        ),
+    )
     return DisplayFrame(
         frame_id=int(entry["frame_id"]),
         matched_count=len(entry.get("matches", [])),
-        created_count=len(entry.get("created_entity_ids", [])),
-        entity_count=int(entry["entity_count_after"]),
+        created_count=int(
+            len(entry["created_entity_ids"])
+            if "created_entity_ids" in entry
+            else created_count
+        ),
+        entity_count=int(entry.get("entity_count_after", visible_entity_count)),
         unmatched_reason_counts={
             str(reason): int(count)
-            for reason, count in entry.get("unmatched_reason_counts", {}).items()
+            for reason, count in reason_payload.items()
         },
         assignments=tuple(assignments),
         pending_count=sum(item.status == "pending" for item in assignments),
         held_count=sum(item.status == "held" for item in assignments),
-        converged=(
-            None if "converged" not in entry else bool(entry["converged"])
-        ),
-        iterations=(
-            None if "iterations" not in entry else int(entry["iterations"])
-        ),
+        converged=None if converged is None else bool(converged),
+        iterations=None if iterations is None else int(iterations),
         forbidden_mass=(
-            None
-            if "noncandidate_mass" not in entry
-            and "forbidden_mass" not in entry
-            else float(
-                entry.get("noncandidate_mass", entry.get("forbidden_mass"))
-            )
+            None if forbidden is None else float(forbidden)
         ),
     )
 
@@ -158,9 +176,14 @@ def _header_lines(title: str, frame: DisplayFrame) -> tuple[str, str]:
         if count
     ) or "unmatched=none"
     if frame.converged is not None:
+        forbidden = (
+            "n/a"
+            if frame.forbidden_mass is None
+            else f"{frame.forbidden_mass:.3f}"
+        )
         reasons += (
             f" | converged={frame.converged} iter={frame.iterations} "
-            f"forbidden={frame.forbidden_mass:.3f}"
+            f"forbidden={forbidden}"
         )
     return first, reasons
 

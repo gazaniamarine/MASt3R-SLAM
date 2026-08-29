@@ -17,6 +17,33 @@ from fact3r.visualization.association import (
 
 
 class AssociationVisualizationTests(unittest.TestCase):
+    def test_image_uot_manifest_without_legacy_entity_count_renders(self) -> None:
+        frame = display_frame_from_manifest(
+            {
+                "frame_id": 40,
+                "matches": [
+                    {"proposal_id": "p0", "entity_id": "image-entity-000060"}
+                ],
+                "unmatched_proposals": [
+                    {
+                        "proposal_id": "p1",
+                        "created_entity_id": "image-entity-000073",
+                        "commitment_status": "confirmed",
+                    }
+                ],
+                "uot": {
+                    "converged": True,
+                    "iterations": 7,
+                    "unmatched_reason_counts": {"birth_residual": 1},
+                },
+            }
+        )
+        self.assertEqual(frame.entity_count, 2)
+        self.assertEqual(frame.created_count, 1)
+        self.assertEqual(frame.unmatched_reason_counts, {"birth_residual": 1})
+        self.assertTrue(frame.converged)
+        self.assertEqual(frame.iterations, 7)
+
     def test_residual_transport_manifest_uses_exact_forbidden_mass(self) -> None:
         frame = display_frame_from_manifest(
             {
