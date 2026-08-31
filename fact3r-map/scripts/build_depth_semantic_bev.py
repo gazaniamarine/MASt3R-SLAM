@@ -204,40 +204,48 @@ def _render_semantic_map(
 
 
 def _write_ply(path: Path, points: np.ndarray, keyframes: np.ndarray) -> None:
-    try:
-        from plyfile import PlyData, PlyElement
-    except ImportError as error:
-        raise ImportError("plyfile is required to write the fused point cloud") from error
     vertices = np.empty(
         len(points),
-        dtype=[("x", "f4"), ("y", "f4"), ("z", "f4"), ("kf_id", "i4")],
+        dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("kf_id", "<i4")],
     )
     vertices["x"], vertices["y"], vertices["z"] = points.T
     vertices["kf_id"] = keyframes
-    PlyData([PlyElement.describe(vertices, "vertex")]).write(path)
+    header = (
+        "ply\nformat binary_little_endian 1.0\n"
+        f"element vertex {len(vertices)}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property int kf_id\nend_header\n"
+    ).encode("ascii")
+    with path.open("wb") as handle:
+        handle.write(header)
+        vertices.tofile(handle)
 
 
 def _write_semantic_ply(
     path: Path, points: np.ndarray, semantic_ids: np.ndarray, weights: np.ndarray
 ) -> None:
-    try:
-        from plyfile import PlyData, PlyElement
-    except ImportError as error:
-        raise ImportError("plyfile is required to write semantic points") from error
     vertices = np.empty(
         len(points),
         dtype=[
-            ("x", "f4"),
-            ("y", "f4"),
-            ("z", "f4"),
-            ("semantic_id", "i4"),
-            ("weight", "f4"),
+            ("x", "<f4"),
+            ("y", "<f4"),
+            ("z", "<f4"),
+            ("semantic_id", "<i4"),
+            ("weight", "<f4"),
         ],
     )
     vertices["x"], vertices["y"], vertices["z"] = points.T
     vertices["semantic_id"] = semantic_ids
     vertices["weight"] = weights
-    PlyData([PlyElement.describe(vertices, "vertex")]).write(path)
+    header = (
+        "ply\nformat binary_little_endian 1.0\n"
+        f"element vertex {len(vertices)}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property int semantic_id\nproperty float weight\nend_header\n"
+    ).encode("ascii")
+    with path.open("wb") as handle:
+        handle.write(header)
+        vertices.tofile(handle)
 
 
 def _parse_args() -> argparse.Namespace:

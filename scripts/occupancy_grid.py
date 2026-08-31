@@ -17,9 +17,10 @@ A camera pitched a few degrees down makes the floor appear sloped, which
 pushes distant floor points above any fixed height threshold and paints
 phantom obstacles at the map edges. Fitting the plane is what removes that.
 
-Deliberately depends only on numpy + plyfile, both already in the
-mast3r-slam env. open3d is NOT required -- installing it risks dragging in a
-numpy 2.x that breaks this repo's dataset loaders.
+Grid construction depends only on NumPy. SciPy is used as an optional
+accelerator when present, and plyfile is needed only when this standalone
+script reads an existing PLY. open3d is NOT required -- installing it risks
+dragging in a numpy 2.x that breaks this repo's dataset loaders.
 """
 
 import argparse
@@ -27,14 +28,55 @@ import pathlib
 import sys
 
 import numpy as np
-from scipy.ndimage import binary_dilation
-from scipy.spatial import cKDTree
 
 try:
     from plyfile import PlyData
 except ImportError:
-    sys.exit("plyfile missing. It ships with the mast3r-slam env -- "
-             "check you are running that env's python.")
+    PlyData = None
+
+try:
+    from scipy.ndimage import binary_dilation as _scipy_binary_dilation
+    from scipy.spatial import cKDTree
+except ImportError:
+    _scipy_binary_dilation = None
+    cKDTree = None
+
+
+def _points_near_path(points, cameras, radius, chunk_size=2048):
+    """SciPy-optional radius query used only to select floor-fit samples."""
+    if cKDTree is not None:
+        return cKDTree(cameras).query(points, k=1)[0] < radius
+    camera_sq = np.sum(cameras * cameras, axis=1)
+    result = np.zeros(len(points), dtype=bool)
+    radius_sq = radius * radius
+    for start in range(0, len(points), chunk_size):
+        block = points[start:start + chunk_size]
+        distance_sq = (
+            np.sum(block * block, axis=1)[:, None]
+            + camera_sq[None, :]
+            - 2.0 * block @ cameras.T
+        )
+        result[start:start + len(block)] = np.min(distance_sq, axis=1) < radius_sq
+    return result
+
+
+def _binary_dilation(mask, structure):
+    """Use SciPy when installed, otherwise apply a small boolean stencil."""
+    if _scipy_binary_dilation is not None:
+        return _scipy_binary_dilation(mask, structure=structure)
+    result = np.zeros_like(mask, dtype=bool)
+    centre_r, centre_c = np.asarray(structure.shape) // 2
+    height, width = mask.shape
+    for row, column in np.argwhere(structure):
+        delta_r, delta_c = int(row - centre_r), int(column - centre_c)
+        source_r0, source_r1 = max(0, -delta_r), min(height, height - delta_r)
+        source_c0, source_c1 = max(0, -delta_c), min(width, width - delta_c)
+        target_r0, target_r1 = source_r0 + delta_r, source_r1 + delta_r
+        target_c0, target_c1 = source_c0 + delta_c, source_c1 + delta_c
+        result[target_r0:target_r1, target_c0:target_c1] |= mask[
+            source_r0:source_r1, source_c0:source_c1
+        ]
+    return result
 
 
 # ---------------------------------------------------------------- loading
@@ -46,6 +88,11 @@ def load_ply(path, extras=False):
     before those fields existed, so callers must handle their absence rather
     than assume a re-run has happened.
     """
+    if PlyData is None:
+        raise ImportError(
+            "reading an existing PLY requires plyfile; install it or use the "
+            "depth-semantic builder, which writes its outputs without plyfile"
+        )
     ply = PlyData.read(str(path))
     v = ply["vertex"].data
     pts = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float64)
@@ -254,8 +301,14 @@ def build_occupancy(pts, cams, *, res=0.05, voxel=0.03, min_h=0.10, max_h=1.50,
     # (walls, far clutter) otherwise dominates and can win the RANSAC vote.
     # KD-tree rather than a broadcast difference: the latter would allocate
     # len(pts) x len(cams) x 3 floats, which is gigabytes on a real cloud.
-    tree = cKDTree(cams)
-    near = pts[tree.query(pts, k=1)[0] < floor_radius]
+    # A supplied metric floor does not need a path-neighbour floor search;
+    # sample the cloud only to report its plane support. This is the rover path
+    # and avoids an unnecessary nearest-neighbour pass over every depth point.
+    near = (
+        pts
+        if floor_plane is not None
+        else pts[_points_near_path(pts, cams, floor_radius)]
+    )
     if len(near) < 1000:
         near = pts
     sample = near[rng.choice(len(near), min(len(near), 60000), replace=False)]
@@ -468,7 +521,7 @@ def build_occupancy(pts, cams, *, res=0.05, voxel=0.03, min_h=0.10, max_h=1.50,
             sup[frr, fcc] = True
             rad = max(1, int(round(support_radius / res)))
             yy, xx = np.ogrid[-rad:rad + 1, -rad:rad + 1]
-            sup = binary_dilation(sup, structure=(xx**2 + yy**2 <= rad**2))
+            sup = _binary_dilation(sup, structure=(xx**2 + yy**2 <= rad**2))
             L[(L < 0) & ~sup] = 0.0     # back to unknown, obstacles untouched
         elif verbose:
             print("  WARNING: no floor points found; skipping support gating")
