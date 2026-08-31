@@ -398,7 +398,7 @@ def build_occupancy(pts, cams, *, res=0.05, voxel=0.03, min_h=0.10, max_h=1.50,
         solid &= tall_enough
     if verbose and min_cell_points > 1:
         kept = int(solid.sum())
-        total = int((counts > 0).sum())
+        total = int((evidence > 0).sum())
         print(f"obstacle cells with >={min_cell_points} points: "
               f"{kept:,}/{total:,} ({100 * kept / max(1, total):.1f}%)")
 
