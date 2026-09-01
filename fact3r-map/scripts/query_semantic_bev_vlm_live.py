@@ -15,7 +15,9 @@ from PIL import Image, ImageDraw
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
 from fact3r.semantics.observation_index import (  # noqa: E402
     Siglip2Encoder,
@@ -25,6 +27,11 @@ from fact3r.semantics.vlm_verification import (  # noqa: E402
     Qwen3VLVerifier,
     prepare_vlm_query,
     verify_prepared_query,
+)
+from query_semantic_bev import (  # noqa: E402
+    _fuse_prompt_scores,
+    _query_prompts,
+    _rank_groups,
 )
 
 
@@ -130,10 +137,16 @@ def main() -> None:
         "--attention-implementation",
         choices=("eager", "sdpa", "flash_attention_2"),
     )
-    parser.add_argument("--max-candidates", type=int, default=5)
+    parser.add_argument(
+        "--top-k",
+        "--max-candidates",
+        dest="max_candidates",
+        type=int,
+        default=5,
+        help="freeze this many embedding results before VLM verification",
+    )
     parser.add_argument("--evidence-views", type=int, default=2)
     parser.add_argument("--min-entity-observations", type=int, default=1)
-    parser.add_argument("--min-siglip-score", type=float, default=0.0)
     parser.add_argument("--min-vlm-confidence", type=float, default=0.65)
     parser.add_argument("--min-vlm-supporting-views", type=int, default=1)
     parser.add_argument("--max-entities", type=int, default=3)
@@ -161,7 +174,7 @@ def main() -> None:
         raise ValueError(f"unsupported semantic BEV: {map_path}")
     index_path = Path(str(map_manifest["source_observation_index"]))
     loaded_index = load_observation_index(index_path)
-    _, index_manifest, _ = loaded_index
+    _, index_manifest, observation_embeddings = loaded_index
     if index_manifest.get("format") != "fact3r-siglip-observation-index":
         raise ValueError(
             "resident VLM verification currently requires a SigLIP observation index"
@@ -173,6 +186,7 @@ def main() -> None:
     map_groups = {
         str(item["group_id"]): dict(item) for item in map_manifest["groups"]
     }
+    index_observations = list(index_manifest["observations"])
     output_root = args.output or map_path.parent / "vlm_live_queries"
     cache_directory = args.cache_directory or index_path.parent / "vlm_cache"
 
@@ -198,6 +212,28 @@ def main() -> None:
     def run_query(query: str) -> None:
         started = perf_counter()
         output = output_root / _slug(query)
+        query_prompts = _query_prompts(query)
+        query_embeddings = encoder.encode_text(query_prompts)
+        retrieval_scores, _, _ = _fuse_prompt_scores(
+            observation_embeddings,
+            query_embeddings,
+            agreement_prompts=2,
+        )
+        retrieval_ranking = _rank_groups(
+            retrieval_scores,
+            index_observations,
+            set(map_groups),
+            top_views=3,
+        )
+        frozen_top_k = retrieval_ranking[: args.max_candidates]
+        frozen_candidate_ids = [str(item["group_id"]) for item in frozen_top_k]
+        print("Frozen embedding top-k (VLM may only accept/reject):")
+        for rank, item in enumerate(frozen_top_k, start=1):
+            observation = index_observations[int(item["best_observation_index"])]
+            print(
+                f"  #{rank} {item['group_id']} score={float(item['score']):.3f} "
+                f"frame={observation['frame_id']}"
+            )
         prepared = prepare_vlm_query(
             index=index_path,
             query=query,
@@ -206,13 +242,16 @@ def main() -> None:
             max_candidates=args.max_candidates,
             top_views=args.evidence_views,
             min_observations=args.min_entity_observations,
-            min_siglip_score=args.min_siglip_score,
+            min_siglip_score=-1.0,
             map_negative_weight=0.0,
             loaded_index=loaded_index,
             keyframe_cache=keyframe_cache,
+            positive_prompts=query_prompts,
+            forced_candidate_ids=frozen_candidate_ids,
+            forced_observation_scores=retrieval_scores,
         )
         if not prepared.candidates:
-            print("No semantic candidate reached the shortlist; try --min-siglip-score -1")
+            print("The frozen embedding top-k contains no eligible mapped entities.")
             return
         result_path = verify_prepared_query(
             prepared,

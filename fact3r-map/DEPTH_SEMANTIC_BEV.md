@@ -75,7 +75,8 @@ bash scripts/run_semantic_bev_vlm_live.sh \
   --map logs/rover/depth_semantic/map \
   --siglip-device 0 \
   --vlm-model Qwen/Qwen3-VL-2B-Instruct \
-  --vlm-device-map auto
+  --vlm-device-map auto \
+  --top-k 5
 ```
 
 Wait for `Ready`, then type queries at the prompt:
@@ -87,12 +88,14 @@ query> chair
 query> quit
 ```
 
-For every query, SigLIP shortlists five persistent entities using the robust
-phrase/head-noun ensemble. Qwen then sees only the two strongest highlighted
-views of each candidate, in small listwise batches. Accepted results save the
-best observed camera frame, a verification gallery, and
-`verified_semantic_bev.png`. Models, embeddings, BEV arrays, loaded camera
-frames, and verification cache remain resident between prompts.
+For every query, the fast semantic-BEV retriever first produces its normal
+ranked top-K using the robust phrase/head-noun ensemble. That exact shortlist
+and order are frozen before Qwen runs. Qwen only accepts or rejects those
+candidates; it cannot introduce a different entity or reorder the shortlist.
+It sees the two strongest highlighted views of each candidate in small listwise
+batches. Accepted results save the best observed camera frame, a verification
+gallery, and `verified_semantic_bev.png`. Models, embeddings, BEV arrays, loaded
+camera frames, and verification cache remain resident between prompts.
 
 The default Qwen model is 2B to prioritize latency. `--history-frames 1` renders
 only the strongest accepted observation; raise it when a longer visual history

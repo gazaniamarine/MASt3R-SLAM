@@ -546,6 +546,58 @@ class SiglipObservationIndexTests(unittest.TestCase):
             verify_prepared_query(prepared, verifier=cached_verifier)
             self.assertEqual(cached_verifier.calls, [])
 
+    def test_vlm_preparation_preserves_forced_embedding_top_k(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            keyframes = root / "keyframes"
+            proposals = root / "proposals"
+            mapping = root / "mapping"
+            index = root / "index"
+            _write_keyframes(keyframes)
+            _write_proposals(proposals)
+            _write_mapping(mapping)
+            encoder = _ColourEncoder()
+            manifest_path = build_observation_index(
+                keyframes=keyframes,
+                proposals=proposals,
+                mapping=mapping,
+                output=index,
+                encoder=encoder,
+                batch_size=2,
+                context_fraction=0.0,
+                outside_mask_alpha=0.0,
+            )
+            loaded_index = load_observation_index(manifest_path)
+            forced_scores = np.asarray(
+                [0.20, 0.90, 0.80, 0.10], dtype=np.float32
+            )
+            prepared = prepare_vlm_query(
+                index=manifest_path,
+                query="clock",
+                output=root / "forced-query",
+                encoder=encoder,
+                max_candidates=2,
+                top_views=1,
+                min_observations=1,
+                min_siglip_score=-1.0,
+                loaded_index=loaded_index,
+                forced_candidate_ids=("entity-blue", "entity-clock"),
+                forced_observation_scores=forced_scores,
+            )
+
+            self.assertEqual(
+                [candidate["candidate_id"] for candidate in prepared.candidates],
+                ["entity-blue", "entity-clock"],
+            )
+            np.testing.assert_allclose(prepared.scores, forced_scores)
+            self.assertEqual(
+                [
+                    candidate["evidence_frame_ids"]
+                    for candidate in prepared.candidates
+                ],
+                [[0], [1]],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

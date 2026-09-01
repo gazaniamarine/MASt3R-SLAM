@@ -729,6 +729,8 @@ def prepare_vlm_query(
     loaded_index: tuple[Path, dict[str, object], NDArray[np.float32]] | None = None,
     keyframe_cache: MutableMapping[int, NDArray[np.uint8]] | None = None,
     positive_prompts: Sequence[str] | None = None,
+    forced_candidate_ids: Sequence[str] | None = None,
+    forced_observation_scores: NDArray[np.floating] | None = None,
 ) -> PreparedVLMQuery:
     """Shortlist candidates with SigLIP and render their multi-view evidence."""
 
@@ -769,6 +771,36 @@ def prepare_vlm_query(
         map_negative_neighbors=map_negative_neighbors,
         map_negative_weight=map_negative_weight,
     )
+    if forced_candidate_ids is not None:
+        forced_ids = list(dict.fromkeys(str(item) for item in forced_candidate_ids))
+        group_lookup = {str(group["candidate_id"]): group for group in groups}
+        groups = [
+            group_lookup[group_id]
+            for group_id in forced_ids
+            if group_id in group_lookup
+        ]
+        if forced_observation_scores is not None:
+            forced_scores = np.asarray(forced_observation_scores, dtype=np.float32)
+            if forced_scores.shape != (len(manifest["observations"]),):
+                raise ValueError(
+                    "forced_observation_scores must contain one score per observation"
+                )
+            scores = forced_scores
+            for candidate in groups:
+                ordered = sorted(
+                    candidate["observation_indices"],
+                    key=lambda item: float(forced_scores[int(item)]),
+                    reverse=True,
+                )
+                evidence = ordered[: min(top_views, len(ordered))]
+                candidate["ranked_observation_indices"] = ordered
+                candidate["evidence_observation_indices"] = evidence
+                candidate["positive_candidate_score"] = float(
+                    np.mean(forced_scores[evidence])
+                )
+                candidate["candidate_score"] = candidate[
+                    "positive_candidate_score"
+                ]
     proposal_directory = Path(str(manifest["source_proposals"]))
     observations = manifest["observations"]
     candidates: list[dict[str, object]] = []
