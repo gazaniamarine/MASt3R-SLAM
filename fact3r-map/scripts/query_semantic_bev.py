@@ -49,17 +49,100 @@ def _rank_groups(
     allowed_groups: set[str],
     *,
     top_views: int,
-) -> list[tuple[str, float, int]]:
-    grouped: dict[str, list[float]] = {}
+) -> list[dict[str, object]]:
+    grouped: dict[str, list[tuple[float, int]]] = {}
     for row, observation in enumerate(observations):
         group_id = str(observation["group_id"])
         if group_id in allowed_groups:
-            grouped.setdefault(group_id, []).append(float(scores[row]))
+            grouped.setdefault(group_id, []).append((float(scores[row]), row))
     ranked = []
-    for group_id, values in grouped.items():
-        strongest = sorted(values, reverse=True)[:top_views]
-        ranked.append((group_id, float(np.mean(strongest)), len(values)))
-    return sorted(ranked, key=lambda item: item[1], reverse=True)
+    for group_id, rows in grouped.items():
+        strongest = sorted(rows, reverse=True)[:top_views]
+        ranked.append(
+            {
+                "group_id": group_id,
+                "score": float(np.mean([item[0] for item in strongest])),
+                "views": len(rows),
+                "best_observation_index": int(strongest[0][1]),
+                "best_view_score": float(strongest[0][0]),
+            }
+        )
+    return sorted(ranked, key=lambda item: float(item["score"]), reverse=True)
+
+
+def _load_observation_image(
+    observation: dict[str, object], index_manifest: dict[str, object]
+) -> tuple[np.ndarray, np.ndarray]:
+    frame_id = int(observation["frame_id"])
+    keyframe_directory = Path(str(index_manifest["source_keyframes"]))
+    keyframe_manifest = json.loads(
+        (keyframe_directory / "manifest.json").read_text(encoding="utf-8")
+    )
+    entry = next(
+        (
+            item
+            for item in keyframe_manifest["keyframes"]
+            if int(item["frame_id"]) == frame_id
+        ),
+        None,
+    )
+    if entry is None:
+        raise ValueError(f"source keyframe {frame_id} is missing")
+    rgb_file = entry.get("rgb_file")
+    if rgb_file is not None and (keyframe_directory / str(rgb_file)).exists():
+        rgb = np.asarray(Image.open(keyframe_directory / str(rgb_file)).convert("RGB"))
+    else:
+        with np.load(keyframe_directory / str(entry["file"]), allow_pickle=False) as data:
+            rgb = np.array(data["rgb"], dtype=np.uint8, copy=True)
+    proposal_directory = Path(str(index_manifest["source_proposals"]))
+    with np.load(
+        proposal_directory / str(observation["mask_file"]), allow_pickle=False
+    ) as data:
+        mask = np.array(data["mask"], dtype=bool, copy=True)
+    if mask.shape != rgb.shape[:2]:
+        mask = np.asarray(
+            Image.fromarray(mask.astype(np.uint8)).resize(
+                (rgb.shape[1], rgb.shape[0]), Image.Resampling.NEAREST
+            ),
+            dtype=bool,
+        )
+    return rgb, mask
+
+
+def _render_observed_frame(
+    rgb: np.ndarray,
+    mask: np.ndarray,
+    *,
+    query: str,
+    group_id: str,
+    frame_id: int,
+    score: float,
+    rank: int,
+    output: Path,
+) -> None:
+    canvas = np.asarray(rgb, dtype=np.float32).copy()
+    colour = np.asarray([25.0, 235.0, 90.0], dtype=np.float32)
+    canvas[mask] = 0.40 * canvas[mask] + 0.60 * colour
+    boundary = mask & ~(
+        np.roll(mask, 1, axis=0)
+        & np.roll(mask, -1, axis=0)
+        & np.roll(mask, 1, axis=1)
+        & np.roll(mask, -1, axis=1)
+    )
+    canvas[boundary] = np.asarray([0.0, 255.0, 70.0])
+    frame = Image.fromarray(np.clip(canvas, 0, 255).astype(np.uint8))
+    banner_height = 58
+    image = Image.new("RGB", (frame.width, frame.height + banner_height), (18, 18, 18))
+    image.paste(frame, (0, banner_height))
+    draw = ImageDraw.Draw(image)
+    draw.text(
+        (10, 8),
+        f'#{rank} query "{query}" | frame {frame_id} | score {score:.3f}',
+        fill="white",
+    )
+    draw.text((10, 30), group_id, fill=(80, 245, 125))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output, quality=94)
 
 
 def _render(
@@ -161,14 +244,23 @@ def main() -> None:
         top_views=args.top_views,
     )
     if args.min_score is not None:
-        ranked = [item for item in ranked if item[1] >= args.min_score]
+        ranked = [item for item in ranked if float(item["score"]) >= args.min_score]
     selected = []
-    for group_id, score, views in ranked[: args.top_k]:
+    index_observations = list(index_manifest["observations"])
+    for group in ranked[: args.top_k]:
+        group_id = str(group["group_id"])
+        observation = index_observations[int(group["best_observation_index"])]
         selected.append(
             {
                 **group_metadata[group_id],
-                "score": score,
-                "views": views,
+                **group,
+                "best_observation": {
+                    "observation_index": int(group["best_observation_index"]),
+                    "frame_id": int(observation["frame_id"]),
+                    "proposal_id": str(observation["proposal_id"]),
+                    "timestamp": observation.get("timestamp"),
+                    "mask_file": str(observation["mask_file"]),
+                },
             }
         )
     grid_path = map_path.parent / str(map_manifest["grid_file"])
@@ -177,6 +269,24 @@ def main() -> None:
         semantic_ids = np.array(payload["semantic_ids"], copy=True)
     output = args.output or map_path.parent / f"{_slug(args.query)}_semantic_bev.png"
     _render(occupancy, semantic_ids, selected, output, args.query)
+    frame_directory = output.parent / f"{output.stem}_observed_frames"
+    for rank, match in enumerate(selected, start=1):
+        observation = index_observations[int(match["best_observation_index"])]
+        rgb, mask = _load_observation_image(observation, index_manifest)
+        frame_path = frame_directory / (
+            f"rank_{rank:02d}_frame_{int(observation['frame_id']):06d}.jpg"
+        )
+        _render_observed_frame(
+            rgb,
+            mask,
+            query=args.query,
+            group_id=str(match["group_id"]),
+            frame_id=int(observation["frame_id"]),
+            score=float(match["best_view_score"]),
+            rank=rank,
+            output=frame_path,
+        )
+        match["best_observation"]["image"] = str(frame_path.resolve())
     result_path = output.with_suffix(".json")
     result_path.write_text(
         json.dumps(
@@ -202,8 +312,10 @@ def main() -> None:
         for rank, match in enumerate(selected, start=1):
             print(
                 f"rank {rank}: {match['group_id']} "
-                f"score={float(match['score']):.3f} views={match['views']}"
+                f"score={float(match['score']):.3f} views={match['views']} "
+                f"frame={match['best_observation']['frame_id']}"
             )
+            print(f"  observed frame: {match['best_observation']['image']}")
     else:
         print("no mapped semantic entity passed the requested score threshold")
     print(f"semantic query map: {output}")

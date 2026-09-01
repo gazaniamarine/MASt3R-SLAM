@@ -56,4 +56,6 @@ conda run --no-capture-output -n SAM2 python3 \
 ```
 
 This query only encodes text and ranks the already stored observations; depth
-and semantic image crops are not recomputed.
+and semantic image crops are not recomputed. It writes the highlighted BEV and
+also an `*_observed_frames/` directory containing the best original camera
+frame and mask for every ranked match.
