@@ -143,3 +143,12 @@ notebooks/*
 # and every one of these is reproducible from logs/ via the scripts in
 # fact3r-map/scripts/, so none of it belongs in the history.
 output/
+
+# Rover captures. Video and odometry live OUTSIDE the repo -- one directory per
+# capture, see ROVER_RUNBOOK.md. These patterns are a safety net so a stray copy
+# inside the tree cannot be committed by a wide `git add`.
+*.mp4
+*.mkv
+*.mov
+*.avi
+odom_*.csv

@@ -602,6 +602,58 @@ vendored at `thirdparty/safediffuser/` (MIT, upstream `Weixy21/SafeDiffuser`); o
 two model checkpoints live outside git — the 2.75 GB MASt3R matcher under `checkpoints/`
 and the 29.6 MB maze2d prior under `thirdparty/safediffuser/logs/pretrained/`.
 
+### Adding a new capture
+
+A capture is **one directory holding exactly two files**, and the shape matters because
+`find_time_offset.py` and the fuse stage both locate them by globbing:
+
+```
+~/Gazania/captures/kitchen_20260915/
+├── whatever_name.mp4      <- glob "*.mp4",      sorted, first match wins
+└── odom_whatever.csv      <- glob "odom_*.csv", sorted, first match wins
+```
+
+Keep captures **outside the repo** — a 60 MB video does not belong in git, and `.gitignore`
+now refuses `*.mp4` / `odom_*.csv` anywhere in the tree as a safety net. The pipeline takes
+absolute paths, so the location is free; only the directory shape is fixed.
+
+Two files per directory, not more. Both scripts take `sorted(...)[0]`, so a second mp4 or a
+second `odom_*.csv` is silently ignored rather than reported.
+
+The odometry CSV needs a header row with at least `t,x,y,theta` — `v` is used by
+`--stationary-skip` and defaults to 0 when absent, and any other columns are ignored, so the
+rover's full 12-column log drops in unchanged. `t` is a float in seconds (the loader re-bases
+it to its own first row) and must be **strictly increasing**, or the fuse stage refuses.
+
+Then, per capture:
+
+```bash
+# 1. measure the clock offset -- never assume it
+python scripts/find_time_offset.py --root ~/Gazania/captures/kitchen_20260915
+
+# 2. run, passing the number it printed
+python3 scripts/run_rover_pipeline.py \
+  --run   logs/rover/pipeline/kitchen_20260915 \
+  --video ~/Gazania/captures/kitchen_20260915/whatever_name.mp4 \
+  --odom  ~/Gazania/captures/kitchen_20260915/odom_whatever.csv \
+  --time-offset <MEASURED> \
+  --query "a chair"
+```
+
+Use a **new `--run` directory per capture**. Stage outputs are keyed on file timestamps, so
+pointing two captures at one run directory will resume onto the wrong map.
+
+### Changing camera or scene
+
+| flag | default | change it when |
+|---|---|---|
+| `--fx` | 631 | different camera or resolution. `scripts/calibrate_camera.py`, or `fx_from_floor_ramp.py` for an uncalibrated rig |
+| `--pitch` | 2.75° | the mount angle changed |
+| `--cam-height` | 0.50 m | the camera sits at a different height. Measure it — it sets metric scale |
+| `--depth-scale` | 0.969 | new camera; re-measure with `scripts/metric_scale.py` |
+| `--no-exclude-exterior` | off | open or unenclosed scenes. The border flood fill assumes walls; on the pilot open hall it claimed 88% of the map as outdoors |
+| `--max-projection` | 2.0 m | the target was only seen from far away (see below) |
+
 ### `--time-offset` is required, and that is deliberate
 
 The keyframe timestamps are on the **video** clock; `_load_odometry` re-bases odometry to
