@@ -13,13 +13,12 @@ import json
 import math
 from pathlib import Path
 from time import perf_counter
-from typing import Mapping, Protocol, Sequence
+from typing import Mapping, MutableMapping, Protocol, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw
 
-from fact3r.integrations.mast3r_slam import iter_exported_keyframes
 from fact3r.semantics.observation_index import (
     VisionLanguageEncoder,
     default_positive_prompts,
@@ -266,6 +265,11 @@ class Qwen3VLVerifier:
     def load_seconds(self) -> float:
         return self._load_seconds
 
+    def load(self) -> None:
+        """Load the model now so interactive queries never pay cold-start cost."""
+
+        self._ensure_loaded()
+
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
@@ -459,7 +463,16 @@ def rank_vlm_candidates(
     positives = _normalise_rows(positive_embeddings)
     if positives.shape[1] != vectors.shape[1]:
         raise ValueError("positive prompt and observation dimensions differ")
-    scores = np.asarray(np.mean(vectors @ positives.T, axis=1), dtype=np.float32)
+    prompt_scores = vectors @ positives.T
+    agreement_count = min(2, prompt_scores.shape[1])
+    strongest_prompt_scores = np.partition(
+        prompt_scores,
+        prompt_scores.shape[1] - agreement_count,
+        axis=1,
+    )[:, -agreement_count:]
+    scores = np.asarray(
+        np.mean(strongest_prompt_scores, axis=1), dtype=np.float32
+    )
     map_negative_scores, map_negative_diagnostics = (
         map_derived_hard_negative_scores(
             vectors,
@@ -662,6 +675,44 @@ class PreparedVLMQuery:
     map_negative_weight: float
 
 
+def _load_keyframe_images(
+    source_keyframes: str | Path,
+    frame_ids: set[int],
+    *,
+    cache: MutableMapping[int, NDArray[np.uint8]] | None = None,
+) -> dict[int, NDArray[np.uint8]]:
+    """Load exact requested frames directly and retain a small resident cache."""
+
+    directory = Path(source_keyframes)
+    manifest = json.loads(
+        (directory / "manifest.json").read_text(encoding="utf-8")
+    )
+    entries = {
+        int(entry["frame_id"]): entry for entry in manifest["keyframes"]
+    }
+    images: dict[int, NDArray[np.uint8]] = {}
+    for frame_id in frame_ids:
+        if cache is not None and frame_id in cache:
+            images[frame_id] = cache[frame_id]
+            continue
+        entry = entries.get(frame_id)
+        if entry is None:
+            raise ValueError(f"keyframe {frame_id} is missing")
+        rgb_file = entry.get("rgb_file")
+        rgb_path = None if rgb_file is None else directory / str(rgb_file)
+        if rgb_path is not None and rgb_path.is_file():
+            with Image.open(rgb_path) as source:
+                rgb = np.array(source.convert("RGB"), dtype=np.uint8, copy=True)
+        else:
+            with np.load(directory / str(entry["file"]), allow_pickle=False) as data:
+                rgb = np.array(data["rgb"], dtype=np.uint8, copy=True)
+        rgb = np.ascontiguousarray(rgb)
+        images[frame_id] = rgb
+        if cache is not None:
+            cache[frame_id] = rgb
+    return images
+
+
 def prepare_vlm_query(
     *,
     index: str | Path,
@@ -675,6 +726,9 @@ def prepare_vlm_query(
     map_negative_neighbors: int = 3,
     map_negative_weight: float = 1.0,
     min_siglip_score: float = 0.10,
+    loaded_index: tuple[Path, dict[str, object], NDArray[np.float32]] | None = None,
+    keyframe_cache: MutableMapping[int, NDArray[np.uint8]] | None = None,
+    positive_prompts: Sequence[str] | None = None,
 ) -> PreparedVLMQuery:
     """Shortlist candidates with SigLIP and render their multi-view evidence."""
 
@@ -685,13 +739,23 @@ def prepare_vlm_query(
     if not -1.0 <= min_siglip_score <= 1.0:
         raise ValueError("min_siglip_score must be in [-1, 1]")
     started = perf_counter()
-    manifest_path, manifest, embeddings = load_observation_index(index)
+    manifest_path, manifest, embeddings = (
+        load_observation_index(index) if loaded_index is None else loaded_index
+    )
     if encoder.model_name != manifest["model"]:
         raise ValueError(
             f"query encoder {encoder.model_name!r} does not match index model "
             f"{manifest['model']!r}"
         )
-    prompts = default_positive_prompts(query)
+    prompts = tuple(
+        default_positive_prompts(query)
+        if positive_prompts is None
+        else dict.fromkeys(
+            prompt.strip() for prompt in positive_prompts if prompt.strip()
+        )
+    )
+    if not prompts:
+        raise ValueError("at least one positive prompt is required")
     text_started = perf_counter()
     prompt_embeddings = encoder.encode_text(prompts)
     text_seconds = perf_counter() - text_started
@@ -737,11 +801,11 @@ def prepare_vlm_query(
         for candidate in candidates
         for index_value in candidate["evidence_observation_indices"]
     }
-    keyframes = {
-        keyframe.frame_id: np.array(keyframe.rgb, copy=True)
-        for keyframe in iter_exported_keyframes(manifest["source_keyframes"])
-        if keyframe.frame_id in needed_frames
-    }
+    keyframes = _load_keyframe_images(
+        str(manifest["source_keyframes"]),
+        needed_frames,
+        cache=keyframe_cache,
+    )
     for rank, candidate in enumerate(candidates, start=1):
         evidence_paths: list[Path] = []
         frame_ids: list[int] = []
@@ -917,6 +981,7 @@ def verify_prepared_query(
     max_observations_per_entity: int | None = None,
     gif_width: int = 1000,
     gif_duration_ms: int = 400,
+    keyframe_cache: MutableMapping[int, NDArray[np.uint8]] | None = None,
 ) -> Path:
     """Verify candidates, then render every observation of accepted entities."""
 
@@ -1072,11 +1137,11 @@ def verify_prepared_query(
         indices.sort(key=lambda item: int(observations[item]["frame_id"]))
         selected_indices.extend((candidate, item) for item in indices)
     needed_frames = {int(observations[item]["frame_id"]) for _, item in selected_indices}
-    keyframes = {
-        keyframe.frame_id: np.array(keyframe.rgb, copy=True)
-        for keyframe in iter_exported_keyframes(prepared.manifest["source_keyframes"])
-        if keyframe.frame_id in needed_frames
-    }
+    keyframes = _load_keyframe_images(
+        str(prepared.manifest["source_keyframes"]),
+        needed_frames,
+        cache=keyframe_cache,
+    )
     proposal_directory = Path(str(prepared.manifest["source_proposals"]))
     frames_directory = prepared.output / "frames"
     frames_directory.mkdir(parents=True, exist_ok=True)

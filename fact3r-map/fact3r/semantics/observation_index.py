@@ -764,6 +764,20 @@ def rank_observation_groups(
 
 def default_positive_prompts(query: str) -> tuple[str, ...]:
     subject = query.strip()
+    words = [
+        "".join(
+            character
+            for character in word.casefold()
+            if character.isalnum() or character == "-"
+        )
+        for word in subject.split()
+    ]
+    words = [word for word in words if word]
+    without_article = (
+        words[1:] if words and words[0] in {"a", "an", "the"} else words
+    )
+    head = without_article[-1] if without_article else subject
+    head_article = "an" if head[:1] in "aeiou" else "a"
     return tuple(
         dict.fromkeys(
             (
@@ -771,6 +785,8 @@ def default_positive_prompts(query: str) -> tuple[str, ...]:
                 f"a photo of {subject}",
                 f"a close-up photo of {subject}",
                 f"{subject} in an indoor scene",
+                head,
+                f"{head_article} {head}",
             )
         )
     )

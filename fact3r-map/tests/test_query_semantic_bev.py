@@ -23,6 +23,13 @@ class QuerySemanticBEVTests(unittest.TestCase):
         self.assertIn("monitor", prompts)
         self.assertIn("a monitor", prompts)
 
+    def test_shared_vlm_prompts_also_include_head_noun(self) -> None:
+        from fact3r.semantics.observation_index import default_positive_prompts
+
+        prompts = default_positive_prompts("computer monitor")
+        self.assertIn("monitor", prompts)
+        self.assertIn("a monitor", prompts)
+
     def test_two_prompt_agreement_recovers_head_noun_signal(self) -> None:
         observation = np.asarray([[1.0, 0.0]], dtype=np.float32)
         prompts = np.asarray(

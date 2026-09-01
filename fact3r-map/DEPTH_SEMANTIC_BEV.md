@@ -65,3 +65,37 @@ article and head-noun forms. For example, `computer monitor` also evaluates
 `a computer monitor`, `monitor`, and `a monitor`, then requires agreement from
 the two strongest variants. The terminal and JSON report the winning wording.
 Use `--exact-query` only for an ablation of the original single-prompt behavior.
+
+## Resident VLM-verified queries
+
+For repeated queries, keep both retrieval and verification models loaded:
+
+```bash
+bash scripts/run_semantic_bev_vlm_live.sh \
+  --map logs/rover/depth_semantic/map \
+  --siglip-device 0 \
+  --vlm-model Qwen/Qwen3-VL-2B-Instruct \
+  --vlm-device-map auto
+```
+
+Wait for `Ready`, then type queries at the prompt:
+
+```text
+query> computer monitor
+query> 3D printer
+query> chair
+query> quit
+```
+
+For every query, SigLIP shortlists five persistent entities using the robust
+phrase/head-noun ensemble. Qwen then sees only the two strongest highlighted
+views of each candidate, in small listwise batches. Accepted results save the
+best observed camera frame, a verification gallery, and
+`verified_semantic_bev.png`. Models, embeddings, BEV arrays, loaded camera
+frames, and verification cache remain resident between prompts.
+
+The default Qwen model is 2B to prioritize latency. `--history-frames 1` renders
+only the strongest accepted observation; raise it when a longer visual history
+is needed. Warm-query latency is printed after every prompt. The first query
+still has normal CUDA/kernel warm-up overhead even though model loading was
+moved before the prompt.
