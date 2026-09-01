@@ -19,6 +19,8 @@ usage() {
     echo "  --pitch DEGREES     camera pitch below horizontal (default: 2.75)"
     echo "  --cam-height METRES camera mount height (default: 0.5)"
     echo "  --scale VALUE       global metric-depth scale (default: 0.969)"
+    echo "  --time-offset SECS  video->odometry clock offset; mandatory unless"
+    echo "                      the two stream durations already agree"
     echo "  --runtime-env NAME  environment with torch, transformers, and OpenCV"
 }
 

@@ -468,12 +468,14 @@ pip install "numpy==1.26.4" "opencv-python==4.10.0.84"
 ## SafeDiffuser + DSTT on the DA2 BEV grid
 
 Planning on `logs/rover/grids/mpl_da2_final.npy` (285x238 @ 0.05 m, free 20.1%,
-occupied 23.9%, unknown 55.4%). Run from the SafeDiffuser repo in `mast3r-slam`.
+occupied 23.9%, unknown 55.4%). The planner is vendored at
+`thirdparty/safediffuser/` — see its README for provenance — so this runs from
+the repo root; `--planner-root` still accepts an external checkout.
 
 ```bash
-cd ../SafeDiffuser_STT
+cd thirdparty/safediffuser
 conda activate mast3r-slam
-G=../MASt3R-SLAM/logs/rover/grids/mpl_da2_final.npy
+G=../../logs/rover/grids/mpl_da2_final.npy
 
 python scripts/plan_hm3d.py --grid $G --n-plans 8 --seed 0 \
   --unknown-slack 0.20 --radius-margin 0.05 --min-separation 3.0
@@ -561,3 +563,107 @@ Consequence for reading the numbers: because unknown binds 61% of the time,
 `min_clearance_m` is **not** a wall clearance. It is distance to the nearer of a wall
 or the frontier of what the camera actually saw. A plan with 0.03 m "clearance" is
 typically 0.03 m from unobserved space, not 0.03 m from an obstacle.
+
+---
+
+## The full pipeline: video + odometry -> a trajectory toward a named object
+
+Everything above is a stage. `scripts/run_rover_pipeline.py` is the flow between them.
+
+```bash
+# [I3D]
+python3 scripts/run_rover_pipeline.py \
+  --run logs/rover/pipeline/mpl_20260826 \
+  --video /home/nahar4/Gazania/MPL/manual_drive_20260826_180408.mp4 \
+  --odom  /home/nahar4/Gazania/MPL/odom_home_session_20260826_180408.csv \
+  --time-offset 26.80 \
+  --query "a 3D printer"
+```
+
+| stage | env | what it does |
+|---|---|---|
+| `frontend` | SAM2 + mast3r-slam | `run_fact3r_real_uot.sh`: frames -> SAM2 proposals -> SigLIP index -> MASt3R 2D matches -> UOT association. Resumes each of those itself. |
+| `fuse` | SAM2 | Depth-Anything-V2 metric depth + odometry -> occupancy grid **and** semantic grid. One depth pass, so one stage. |
+| `locate` | SAM2 | SigLIP text query -> the winning entity's footprint. |
+| `goal` | mast3r-slam | that footprint -> a reachable world `(y, x)`. |
+| `plan` | mast3r-slam | SafeDiffuser + DSTT to that goal. |
+
+`--stage NAME` runs one; `--from` / `--through` run a range; the five front-end step
+names (`frames`, `proposals`, `embed`, `match`, `associate`) are accepted and select
+`frontend`. Resume is the default — a stage whose outputs are newer than its inputs is
+skipped — and `--force` re-runs the selected stages and nothing upstream. Every run
+writes `pipeline.json` with the resolved parameters, per-stage timings, and the git SHA.
+
+Pass `--frontend-dir` to adopt an existing stages 1–5 output rather than spending hours
+rebuilding one.
+
+Everything the pipeline needs is in this one repo. The SafeDiffuser + DSTT planner is
+vendored at `thirdparty/safediffuser/` (MIT, upstream `Weixy21/SafeDiffuser`); only the
+two model checkpoints live outside git — the 2.75 GB MASt3R matcher under `checkpoints/`
+and the 29.6 MB maze2d prior under `thirdparty/safediffuser/logs/pretrained/`.
+
+### `--time-offset` is required, and that is deliberate
+
+The keyframe timestamps are on the **video** clock; `_load_odometry` re-bases odometry to
+its own first row. On the 2026-08-26 capture those differ by **26.80 s** — logging started
+~27 s before the camera. Measure it with `scripts/find_time_offset.py`, never assume it.
+
+It fails *silently*. Video 0–467 s sits entirely inside odometry 0–494.8 s, so the
+`timestamp < odom_t[0]` guard never trips: `skipped_frames` stays 0 and the PNG renders
+fine while every pose is wrong by a median **2.65 m and 89.2° of yaw**. What it costs:
+
+| grid | free | occupied | unknown |
+|---|---|---|---|
+| `logs/rover/depth_semantic/map.npy` (offset 0) | **0.9%** | 39.3% | 59.7% |
+| `logs/rover/pipeline/mpl_20260826/map.npy` (offset 26.80) | **15.4%** | 26.7% | 57.1% |
+| `logs/rover/grids/mpl_da2_final.npy` (reference) | 20.1% | 23.9% | 55.4% |
+
+0.9% free leaves A* nothing to search. `build_depth_semantic_bev.py` now **refuses to
+run** when no offset is given and the two stream durations disagree by more than
+`--clock-tolerance` (2 s); `--assume-synchronised` overrides it for captures that really
+do share a clock. The offset used is recorded in the map manifest as `time_offset_seconds`.
+
+### The query only ranks entities that are on the map
+
+`build_semantic_grid` awards each BEV cell to a single winning entity, so most groups win
+none: **1,532 of 14,555** hold even one cell on this map. Ranking all of them returns
+matches with no position at all — every one of the top five for `"a 3D printer"` occupied
+zero cells. `query_semantic_bev.py` and `resolve_semantic_goal.py` now restrict to
+on-map entities by default and report how many were dropped; `--include-unmapped` keeps
+the unrestricted behaviour for retrieval evaluation, where recall over the whole memory
+is the point.
+
+Expect ties. Consecutive frames of one object that UOT never merged become separate
+entities with near-identical prototypes, so eight entities share the top score here.
+`--tie-break cells` (the default) takes the one with the most map support.
+
+### The centroid of an entity is not a goal
+
+An object's own footprint is occupied by construction, and the centroid of a U-shaped or
+split entity lands in the wall between its parts or in unobserved space. So
+`project_semantic_goal.py` treats it as a seed: it projects to the nearest cell that is
+navigable **and** in the same component, using `HM3DMap`'s clearance and
+`planner.largest_component` rather than a second definition of either. Among cells the
+same distance away to within a robot radius it prefers the one with the most clearance —
+projecting onto a region always lands on its boundary, which is exactly where clearance
+is worst.
+
+`--max-projection` (default 2.0 m) is the honesty check: past it, the goal is no longer
+about the entity that was asked for and the stage fails with the distance rather than
+returning a point. On this capture `"a 3D printer"` needs **4.0 m**, because the rover
+never drove within 2.75 m of the printer — its own track stops at x = 3.81 m and the
+printer is at x = 6.46 m, so it was only ever seen from across the room.
+
+### `plan_hm3d.py --start / --goal`
+
+Endpoints in world **`(y, x)`** metres — the order `HM3DMap.cell_to_world` returns, *not*
+the `(x, y)` of the grid yaml's `origin`. A swap produces a confident plan to the wrong
+room and no error, so both are validated against the navigable set (and against each
+other's connected component) before the checkpoint is loaded.
+
+With neither flag the behaviour is exactly as before: `sample_endpoints`, same rng draws.
+With one, the other is drawn from the same component via `planner.sample_partner`.
+
+> Note that `--seed` seeds numpy only — endpoints and the PRM. The diffusion noise comes
+> from torch's global generator, which nothing here seeds, so path lengths vary by a few
+> hundred millimetres between identical runs. Collision, clearance, and goal error do not.

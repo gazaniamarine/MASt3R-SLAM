@@ -248,6 +248,81 @@ def _write_semantic_ply(
         vertices.tofile(handle)
 
 
+def _keyframe_timestamps(
+    keyframes, keyframe_entries: dict[int, dict[str, object]], frame_fps: float
+) -> np.ndarray:
+    """Keyframe times on the video clock, before any offset is applied."""
+
+    stamps = []
+    for keyframe in keyframes:
+        entry = keyframe_entries.get(keyframe.frame_id, {})
+        raw = entry.get("timestamp", keyframe.timestamp)
+        try:
+            stamps.append(float(raw))
+        except (TypeError, ValueError):
+            stamps.append(keyframe.frame_id / frame_fps)
+    return np.asarray(stamps, dtype=np.float64)
+
+
+def _resolve_time_offset(
+    video_t: np.ndarray, odom_t: np.ndarray, args: argparse.Namespace
+) -> tuple[float, dict[str, object]]:
+    """Settle the video->odometry clock offset, refusing to guess it silently.
+
+    The keyframe timestamps are on the video clock and `_load_odometry` re-bases
+    odometry to its own first row, so the two only agree if the camera and the
+    logger started together. On the 2026-08-26 capture they did not -- logging
+    ran 27 s early -- and because the whole video interval still sits inside the
+    odometry interval, nothing downstream notices: no frame is skipped, the PNG
+    renders, and every pose is wrong by 2.65 m and 89 degrees.
+
+    So a duration disagreement larger than `--clock-tolerance` makes an explicit
+    `--time-offset` mandatory. The number itself comes from
+    scripts/find_time_offset.py, which correlates image pan against logged yaw
+    rate; it is not something this script can recover from durations alone,
+    because equal durations do not imply equal start times either.
+    """
+
+    video_span = float(video_t[-1] - video_t[0])
+    odom_span = float(odom_t[-1] - odom_t[0])
+    mismatch = abs(odom_span - video_span)
+    check = {
+        "video_span_seconds": video_span,
+        "odometry_span_seconds": odom_span,
+        "duration_mismatch_seconds": mismatch,
+        "tolerance_seconds": args.clock_tolerance,
+    }
+    if args.time_offset is None:
+        if mismatch > args.clock_tolerance and not args.assume_synchronised:
+            raise SystemExit(
+                f"refusing to fuse: the streams disagree by {mismatch:.1f}s "
+                f"(video {video_span:.1f}s, odometry {odom_span:.1f}s) and no "
+                "--time-offset was given. Every pose would be silently wrong "
+                "while skipped_frames stayed 0. Measure the offset with\n"
+                "  python scripts/find_time_offset.py --root <capture dir>\n"
+                "and pass it as --time-offset SECONDS, or override with "
+                "--assume-synchronised if the clocks really are shared."
+            )
+        offset = 0.0
+        check["source"] = "assumed-synchronised"
+    else:
+        offset = float(args.time_offset)
+        check["source"] = "explicit"
+    check["time_offset_seconds"] = offset
+    # After the shift the video interval should land inside the odometry one;
+    # anything sticking out is time the rover was not being logged for.
+    check["outside_odometry_seconds"] = float(
+        max(0.0, odom_t[0] - (video_t[0] + offset))
+        + max(0.0, (video_t[-1] + offset) - odom_t[-1])
+    )
+    print(
+        f"clock check: video {video_span:.1f}s, odometry {odom_span:.1f}s, "
+        f"offset {offset:+.2f}s ({check['source']}), "
+        f"{check['outside_odometry_seconds']:.1f}s of video outside odometry"
+    )
+    return offset, check
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index", type=Path, required=True)
@@ -277,7 +352,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--pitch", type=float, default=2.75)
     parser.add_argument("--cam-height", type=float, default=0.5)
     parser.add_argument("--scale", type=float, default=0.969)
-    parser.add_argument("--time-offset", type=float, default=0.0)
+    parser.add_argument(
+        "--time-offset",
+        type=float,
+        help="seconds added to the keyframe (video-clock) timestamps to reach "
+        "the odometry clock; measure it with scripts/find_time_offset.py",
+    )
+    parser.add_argument(
+        "--clock-tolerance",
+        type=float,
+        default=2.0,
+        help="seconds the two stream durations may disagree by before an "
+        "explicit --time-offset becomes mandatory",
+    )
+    parser.add_argument(
+        "--assume-synchronised",
+        action="store_true",
+        help="accept a zero offset despite a duration mismatch",
+    )
     parser.add_argument("--frame-fps", type=float, default=2.0)
     parser.add_argument("--pixel-stride", type=int, default=3)
     parser.add_argument("--semantic-pixel-stride", type=int, default=3)
@@ -326,6 +418,11 @@ def main() -> None:
         keyframes = keyframes[: args.max_frames]
     if not keyframes:
         raise ValueError("source keyframe export is empty")
+    time_offset, clock_check = _resolve_time_offset(
+        _keyframe_timestamps(keyframes, keyframe_entries, args.frame_fps),
+        odom_t,
+        args,
+    )
 
     first_height, first_width = keyframes[0].image_shape
     source_shape = (
@@ -514,9 +611,9 @@ def main() -> None:
         entry = keyframe_entries.get(keyframe.frame_id, {})
         raw_timestamp = entry.get("timestamp", keyframe.timestamp)
         try:
-            timestamp = float(raw_timestamp) + args.time_offset
+            timestamp = float(raw_timestamp) + time_offset
         except (TypeError, ValueError):
-            timestamp = keyframe.frame_id / args.frame_fps + args.time_offset
+            timestamp = keyframe.frame_id / args.frame_fps + time_offset
         if timestamp < odom_t[0] or timestamp > odom_t[-1]:
             skipped += 1
             continue
@@ -635,6 +732,8 @@ def main() -> None:
         "shape": list(occupancy.shape),
         "intrinsics_on_keyframes": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
         "depth_scale": args.scale,
+        "time_offset_seconds": time_offset,
+        "clock_check": clock_check,
         "camera_pitch_degrees": args.pitch,
         "camera_height_metres": args.cam_height,
         "processed_frames": len(poses),

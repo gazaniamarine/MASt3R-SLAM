@@ -15,6 +15,8 @@ assert SPEC is not None and SPEC.loader is not None
 query_semantic_bev = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(query_semantic_bev)
 
+from fact3r.semantics.semantic_goal import group_cell_counts  # noqa: E402
+
 
 class QuerySemanticBEVTests(unittest.TestCase):
     def test_query_ensemble_keeps_exact_phrase_and_head_noun(self) -> None:
@@ -58,6 +60,31 @@ class QuerySemanticBEVTests(unittest.TestCase):
         self.assertEqual(ranked[0]["group_id"], "a")
         self.assertEqual(ranked[0]["best_observation_index"], 1)
         self.assertAlmostEqual(float(ranked[0]["best_view_score"]), 0.8)
+
+    def test_on_map_filter_keeps_the_query_off_positionless_entities(self) -> None:
+        """Ranking every group returns entities that cannot be navigated to.
+
+        `build_semantic_grid` awards a cell to one entity, so most groups win
+        none; without the filter the highest scorer is routinely one of them.
+        """
+        semantic_ids = np.asarray([[7, -1], [-1, -1]], dtype=np.int32)
+        groups = [
+            {"semantic_id": 7, "group_id": "on-map"},
+            {"semantic_id": 8, "group_id": "off-map"},
+        ]
+        counts = group_cell_counts(semantic_ids, groups)
+        on_map = {group for group, cells in counts.items() if cells > 0}
+        observations = [{"group_id": "off-map"}, {"group_id": "on-map"}]
+        # The off-map entity scores higher, and must still not be returned.
+        scores = np.asarray([0.9, 0.1])
+        ranked = query_semantic_bev._rank_groups(
+            scores, observations, on_map, top_views=1
+        )
+        self.assertEqual([item["group_id"] for item in ranked], ["on-map"])
+        unrestricted = query_semantic_bev._rank_groups(
+            scores, observations, set(counts), top_views=1
+        )
+        self.assertEqual(unrestricted[0]["group_id"], "off-map")
 
     def test_observed_frame_renderer_writes_highlighted_image(self) -> None:
         rgb = np.full((10, 12, 3), 80, dtype=np.uint8)

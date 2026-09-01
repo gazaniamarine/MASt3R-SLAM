@@ -20,6 +20,7 @@ from fact3r.semantics.observation_index import (  # noqa: E402
     Siglip2Encoder,
     load_observation_index,
 )
+from fact3r.semantics.semantic_goal import group_cell_counts  # noqa: E402
 
 
 def _map_manifest(path: Path) -> Path:
@@ -255,6 +256,13 @@ def main() -> None:
         action="store_true",
         help="disable automatic phrase/head-noun prompt fusion",
     )
+    parser.add_argument(
+        "--include-unmapped",
+        action="store_true",
+        help="also rank entities that won no BEV cell. They have no position, "
+        "so nothing can be navigated to them; kept for retrieval evaluation, "
+        "where recall over the whole memory is the quantity of interest.",
+    )
     args = parser.parse_args()
     if args.top_k <= 0 or args.top_views <= 0:
         raise ValueError("top-k and top-views must be positive")
@@ -292,10 +300,28 @@ def main() -> None:
     group_metadata = {
         str(item["group_id"]): item for item in map_manifest["groups"]
     }
+    grid_path = map_path.parent / str(map_manifest["grid_file"])
+    with np.load(grid_path, allow_pickle=False) as payload:
+        occupancy = np.array(payload["occupancy"], copy=True)
+        semantic_ids = np.array(payload["semantic_ids"], copy=True)
+    cell_counts = group_cell_counts(semantic_ids, map_manifest["groups"])
+    candidates = set(group_metadata)
+    if not args.include_unmapped:
+        candidates = {group for group in candidates if cell_counts.get(group, 0) > 0}
+        print(
+            f"on-map filter: {len(candidates)} of {len(group_metadata)} entities "
+            f"hold a BEV cell; {len(group_metadata) - len(candidates)} dropped"
+        )
+    if not candidates:
+        raise SystemExit(
+            "no entity in this map holds a BEV cell -- there is nothing to "
+            "rank. Re-run the fuse stage, or pass --include-unmapped to score "
+            "the memory without positions."
+        )
     ranked = _rank_groups(
         scores,
         list(index_manifest["observations"]),
-        set(group_metadata),
+        candidates,
         top_views=args.top_views,
     )
     if args.min_score is not None:
@@ -310,6 +336,7 @@ def main() -> None:
             {
                 **group_metadata[group_id],
                 **group,
+                "cell_count": int(cell_counts.get(group_id, 0)),
                 "best_observation": {
                     "observation_index": int(group["best_observation_index"]),
                     "frame_id": int(observation["frame_id"]),
@@ -322,10 +349,6 @@ def main() -> None:
                 },
             }
         )
-    grid_path = map_path.parent / str(map_manifest["grid_file"])
-    with np.load(grid_path, allow_pickle=False) as payload:
-        occupancy = np.array(payload["occupancy"], copy=True)
-        semantic_ids = np.array(payload["semantic_ids"], copy=True)
     output = args.output or map_path.parent / f"{_slug(args.query)}_semantic_bev.png"
     _render(occupancy, semantic_ids, selected, output, args.query)
     frame_directory = output.parent / f"{output.stem}_observed_frames"
@@ -354,6 +377,9 @@ def main() -> None:
                 "version": 1,
                 "query": args.query,
                 "query_prompts": query_prompts,
+                "on_map_only": not args.include_unmapped,
+                "candidate_entities": len(candidates),
+                "dropped_entities": len(group_metadata) - len(candidates),
                 "source_map": str(map_path.resolve()),
                 "matches": selected,
                 "image": str(output.resolve()),
@@ -373,6 +399,7 @@ def main() -> None:
             print(
                 f"rank {rank}: {match['group_id']} "
                 f"score={float(match['score']):.3f} views={match['views']} "
+                f"cells={match['cell_count']} "
                 f"frame={match['best_observation']['frame_id']} "
                 f"prompt={match['best_observation']['winning_prompt']!r}"
             )
