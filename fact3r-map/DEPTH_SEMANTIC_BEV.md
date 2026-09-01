@@ -59,3 +59,9 @@ This query only encodes text and ranks the already stored observations; depth
 and semantic image crops are not recomputed. It writes the highlighted BEV and
 also an `*_observed_frames/` directory containing the best original camera
 frame and mask for every ranked match.
+
+Multi-word object queries automatically combine the exact phrase with generic
+article and head-noun forms. For example, `computer monitor` also evaluates
+`a computer monitor`, `monitor`, and `a monitor`, then requires agreement from
+the two strongest variants. The terminal and JSON report the winning wording.
+Use `--exact-query` only for an ablation of the original single-prompt behavior.

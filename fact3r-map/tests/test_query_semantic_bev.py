@@ -17,6 +17,25 @@ SPEC.loader.exec_module(query_semantic_bev)
 
 
 class QuerySemanticBEVTests(unittest.TestCase):
+    def test_query_ensemble_keeps_exact_phrase_and_head_noun(self) -> None:
+        prompts = query_semantic_bev._query_prompts("computer monitor")
+        self.assertIn("computer monitor", prompts)
+        self.assertIn("monitor", prompts)
+        self.assertIn("a monitor", prompts)
+
+    def test_two_prompt_agreement_recovers_head_noun_signal(self) -> None:
+        observation = np.asarray([[1.0, 0.0]], dtype=np.float32)
+        prompts = np.asarray(
+            [[0.0, 1.0], [0.1, 0.9], [1.0, 0.0], [0.9, 0.1]],
+            dtype=np.float32,
+        )
+        fused, winner, raw = query_semantic_bev._fuse_prompt_scores(
+            observation, prompts, agreement_prompts=2
+        )
+        self.assertGreater(float(fused[0]), 0.9)
+        self.assertEqual(int(winner[0]), 2)
+        self.assertEqual(raw.shape, (1, 4))
+
     def test_ranking_retains_best_source_observation(self) -> None:
         observations = [
             {"group_id": "a"},

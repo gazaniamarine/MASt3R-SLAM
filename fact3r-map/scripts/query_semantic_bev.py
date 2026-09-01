@@ -43,6 +43,50 @@ def _normalise(array: np.ndarray) -> np.ndarray:
     return np.divide(values, norms, out=np.zeros_like(values), where=norms > 1e-12)
 
 
+def _query_prompts(query: str, *, ensemble: bool = True) -> list[str]:
+    """Create generic visual-category fallbacks without object-specific rules."""
+
+    cleaned = " ".join(query.strip().split())
+    if not cleaned:
+        raise ValueError("query must not be empty")
+    if not ensemble:
+        return [cleaned]
+    words = [
+        "".join(character for character in word if character.isalnum() or character == "-")
+        for word in cleaned.lower().split()
+    ]
+    words = [word for word in words if word]
+    without_article = words[1:] if words and words[0] in {"a", "an", "the"} else words
+    base = " ".join(without_article) or cleaned
+    head = without_article[-1] if without_article else cleaned
+    article_for_base = "an" if base[:1].lower() in "aeiou" else "a"
+    article_for_head = "an" if head[:1].lower() in "aeiou" else "a"
+    prompts = [cleaned, base, f"{article_for_base} {base}", head, f"{article_for_head} {head}"]
+    return list(dict.fromkeys(prompt for prompt in prompts if prompt))
+
+
+def _fuse_prompt_scores(
+    observation_embeddings: np.ndarray,
+    text_embeddings: np.ndarray,
+    *,
+    agreement_prompts: int = 2,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fuse prompt variants by their strongest agreement, not a brittle mean."""
+
+    if agreement_prompts <= 0:
+        raise ValueError("agreement_prompts must be positive")
+    scores = _normalise(observation_embeddings) @ _normalise(text_embeddings).T
+    count = min(agreement_prompts, scores.shape[1])
+    strongest = np.partition(scores, scores.shape[1] - count, axis=1)[:, -count:]
+    fused = np.mean(strongest, axis=1)
+    winning_prompt = np.argmax(scores, axis=1)
+    return (
+        np.asarray(fused, dtype=np.float32),
+        np.asarray(winning_prompt, dtype=np.int32),
+        np.asarray(scores, dtype=np.float32),
+    )
+
+
 def _rank_groups(
     scores: np.ndarray,
     observations: list[dict[str, object]],
@@ -206,6 +250,11 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--top-views", type=int, default=3)
     parser.add_argument("--min-score", type=float)
+    parser.add_argument(
+        "--exact-query",
+        action="store_true",
+        help="disable automatic phrase/head-noun prompt fusion",
+    )
     args = parser.parse_args()
     if args.top_k <= 0 or args.top_views <= 0:
         raise ValueError("top-k and top-views must be positive")
@@ -231,9 +280,15 @@ def main() -> None:
         encoder = Siglip2Encoder(str(index_manifest["model"]), device=args.device)
     load_seconds = perf_counter() - started
     text_started = perf_counter()
-    query_embedding = _normalise(encoder.encode_text([args.query]))
+    query_prompts = _query_prompts(args.query, ensemble=not args.exact_query)
+    query_embeddings = encoder.encode_text(query_prompts)
     text_seconds = perf_counter() - text_started
-    scores = _normalise(embeddings) @ query_embedding[0]
+    scores, winning_prompt_rows, _ = _fuse_prompt_scores(
+        embeddings,
+        query_embeddings,
+        agreement_prompts=1 if args.exact_query else 2,
+    )
+    print("query prompts: " + " | ".join(query_prompts))
     group_metadata = {
         str(item["group_id"]): item for item in map_manifest["groups"]
     }
@@ -250,6 +305,7 @@ def main() -> None:
     for group in ranked[: args.top_k]:
         group_id = str(group["group_id"])
         observation = index_observations[int(group["best_observation_index"])]
+        best_observation_index = int(group["best_observation_index"])
         selected.append(
             {
                 **group_metadata[group_id],
@@ -260,6 +316,9 @@ def main() -> None:
                     "proposal_id": str(observation["proposal_id"]),
                     "timestamp": observation.get("timestamp"),
                     "mask_file": str(observation["mask_file"]),
+                    "winning_prompt": query_prompts[
+                        int(winning_prompt_rows[best_observation_index])
+                    ],
                 },
             }
         )
@@ -294,6 +353,7 @@ def main() -> None:
                 "format": "fact3r-depth-semantic-bev-query",
                 "version": 1,
                 "query": args.query,
+                "query_prompts": query_prompts,
                 "source_map": str(map_path.resolve()),
                 "matches": selected,
                 "image": str(output.resolve()),
@@ -313,7 +373,8 @@ def main() -> None:
             print(
                 f"rank {rank}: {match['group_id']} "
                 f"score={float(match['score']):.3f} views={match['views']} "
-                f"frame={match['best_observation']['frame_id']}"
+                f"frame={match['best_observation']['frame_id']} "
+                f"prompt={match['best_observation']['winning_prompt']!r}"
             )
             print(f"  observed frame: {match['best_observation']['image']}")
     else:
