@@ -247,7 +247,6 @@ def plan_argv(args, stem, goal_path, plans_dir):
         "--ckpt", args.ckpt,
         "--n-plans", args.n_plans,
         "--seed", args.seed,
-        "--route-source", args.route_source,
         "--unknown-slack", args.unknown_slack,
         "--robot-radius", args.robot_radius,
         "--radius-margin", args.radius_margin,
@@ -346,7 +345,6 @@ def main():
     ap.add_argument("--robot-radius", type=float, default=0.20)
     ap.add_argument("--radius-margin", type=float, default=0.05)
     ap.add_argument("--min-separation", type=float, default=3.0)
-    ap.add_argument("--route-source", default="astar", choices=["astar", "prm"])
     ap.add_argument("--n-plans", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt", default=DEFAULT_CKPT)

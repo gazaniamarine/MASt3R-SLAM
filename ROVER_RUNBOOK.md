@@ -716,6 +716,6 @@ other's connected component) before the checkpoint is loaded.
 With neither flag the behaviour is exactly as before: `sample_endpoints`, same rng draws.
 With one, the other is drawn from the same component via `planner.sample_partner`.
 
-> Note that `--seed` seeds numpy only — endpoints and the PRM. The diffusion noise comes
+> Note that `--seed` seeds numpy only — the endpoint sampling. The diffusion noise comes
 > from torch's global generator, which nothing here seeds, so path lengths vary by a few
 > hundred millimetres between identical runs. Collision, clearance, and goal error do not.

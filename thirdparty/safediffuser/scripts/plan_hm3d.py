@@ -34,7 +34,6 @@ from diffuser.models.temporal import TemporalUnet          # noqa: E402
 from diffuser.hm3d.diffusion import HM3DGaussianDiffusion  # noqa: E402
 from diffuser.hm3d.map import HM3DMap                      # noqa: E402
 from diffuser.hm3d import planner                          # noqa: E402
-from diffuser.hm3d import roadmap as roadmap_mod            # noqa: E402
 from diffuser.hm3d import plans_dir_for                     # noqa: E402
 from diffuser.hm3d.tube import radii_at_batch, tube_mask     # noqa: E402
 
@@ -105,9 +104,11 @@ def report_diversity(plans):
         because both return exactly one trajectory per query.
 
     between_route_spread_m
-        Spread across tubes. This one is PRM's, not the model's. It measures
-        scene coverage, and it is reported so that it is never mistaken for the
-        line above.
+        Spread across tubes. This one is the A* route search's, not the
+        model's. It measures scene coverage, and it is reported so that it is
+        never mistaken for the line above. With a single route there are no
+        pairs to compare and it is necessarily zero, which the line says
+        outright rather than leaving it to look like a failure.
     """
     out = {}
     for q in sorted({p["query"] for p in plans}):
@@ -132,7 +133,8 @@ def report_diversity(plans):
         print(f"    within-route spread  {d['within_route_spread_m']:.3f} m "
               f"<- diffusion (generative)")
         print(f"    between-route spread {d['between_route_spread_m']:.3f} m "
-              f"<- PRM (scene coverage)")
+              f"<- A* (scene coverage)"
+              + ("  [1 route: no pairs to compare]" if d['n_routes'] < 2 else ""))
         print(f"    collision-free       {d['collision_free_frac'] * 100:.0f}% "
               f"of trajectories")
     return out
@@ -258,7 +260,7 @@ def validate_explicit_endpoints(hm3d_map, args):
     """Reject an unusable endpoint before the checkpoint is loaded.
 
     Called ahead of `load_model` on purpose: a mistyped goal is most often an
-    axis swap, and waiting until the sampler has a roadmap and 1.9 M steps of
+    axis swap, and waiting until the sampler has 1.9 M steps of
     weights in memory to say so wastes a minute to deliver a one-line message.
     Draws no random numbers, so a run with no explicit endpoints is untouched.
     """
@@ -367,11 +369,6 @@ def main():
     ap.add_argument("--route-min-deviation", type=float, default=0.40,
                     help="mean separation, metres, below which two routes are "
                          "treated as the same route")
-    ap.add_argument("--route-source", choices=["prm", "astar"], default="prm",
-                    help="prm: one roadmap per scene, cheap per route. "
-                         "astar: penalty re-runs, a full grid sweep each.")
-    ap.add_argument("--prm-nodes", type=int, default=4000)
-    ap.add_argument("--prm-neighbours", type=int, default=16)
     # The contraction floor. At 0 the tube closes to r_min and every sample of
     # a route collapses onto the same curve, which is the behaviour that made
     # the batch redundant; raising it leaves the sampler corridor width to
@@ -408,17 +405,6 @@ def main():
 
     rng = np.random.default_rng(args.seed)
 
-    # Built once: it depends on the map, not on the query, so every route in
-    # every query below is a Dijkstra over a few hundred nodes instead of a
-    # sweep over the whole grid.
-    prm = None
-    if args.route_source == "prm":
-        t0 = time.time()
-        prm = roadmap_mod.build(hm3d_map, n_nodes=args.prm_nodes,
-                                k_neighbours=args.prm_neighbours, rng=rng)
-        print(f"roadmap: {prm.n} nodes, {len(prm.src)} edges "
-              f"in {time.time() - t0:.1f}s")
-
     if args.start is not None and args.goal is not None and args.n_plans > 1:
         print(f"note: both endpoints are fixed, so all {args.n_plans} queries "
               "are the same problem; the spread they show is the sampler's")
@@ -430,14 +416,9 @@ def main():
         # K genuinely different routes between the SAME endpoints, each
         # repeated S times so the sampler also gets to differ within a route.
         # The batch is K*S trajectories from one denoising pass.
-        if prm is not None:
-            lines, raws = roadmap_mod.routes(
-                prm, hm3d_map, start_yx, goal_yx, diffusion.horizon,
-                k=args.n_routes, min_deviation=args.route_min_deviation)
-        else:
-            lines, raws = planner.diverse_centerlines(
-                hm3d_map, start_yx, goal_yx, diffusion.horizon,
-                k=args.n_routes, min_deviation=args.route_min_deviation)
+        lines, raws = planner.diverse_centerlines(
+            hm3d_map, start_yx, goal_yx, diffusion.horizon,
+            k=args.n_routes, min_deviation=args.route_min_deviation)
         K = len(lines)
         S = args.samples_per_route
         batch_lines = np.repeat(lines, S, axis=0)          # (K*S, H, 2)
@@ -548,7 +529,7 @@ def main():
         "radius_margin": args.radius_margin,
         "navigable_area_m2": float(
             planner.largest_component(planner.navigable(hm3d_map)).sum() * hm3d_map.res ** 2),
-        "route_source": args.route_source,
+        "route_source": "astar",
         "n_routes": args.n_routes,
         "samples_per_route": args.samples_per_route,
         "spread": args.spread,

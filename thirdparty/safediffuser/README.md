@@ -29,8 +29,7 @@ grid-planning entry point. Upstream has no equivalent.
 | `diffuser/hm3d/planner.py` | A* over the clearance field, plus smoothing, resampling, repair, and `diverse_centerlines` for K distinct routes |
 | `diffuser/hm3d/tube.py` | the DSTT tube radii the guidance projects onto |
 | `diffuser/hm3d/diffusion.py` | `HM3DGaussianDiffusion`, which binds a map and tube to the pretrained maze2d prior |
-| `diffuser/hm3d/roadmap.py` | the PRM alternative to A*. **Not used by the pipeline** — it is kept because `--route-source prm` is still `plan_hm3d.py`'s own default for older benchmark invocations |
-| `scripts/plan_hm3d.py` | the entry point; `--route-source astar` is what the pipeline passes |
+| `scripts/plan_hm3d.py` | the entry point. Centerlines come from A* only |
 
 ## Weights are not in git
 
