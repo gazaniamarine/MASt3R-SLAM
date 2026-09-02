@@ -214,6 +214,22 @@ The complete notation, objective, generalized Sinkhorn updates, memory rules,
 query equations, defaults, rationale and ablation plan are in
 [`FACT3R_METHODS.tex`](FACT3R_METHODS.tex).
 
+Check whether a completed UOT map is numerically healthy and whether it is
+actually reusing identities instead of repeatedly creating new ones:
+
+```bash
+conda run --no-capture-output -n SAM2 python3 \
+  fact3r-map/scripts/check_uot_mapping.py \
+  --mapping logs/fact3r_real_uot/MAP_NAME/image_uot \
+  --output logs/fact3r_real_uot/MAP_NAME/uot_diagnostic.json
+```
+
+The report includes solver convergence, identity reuse, residual births,
+same-frame duplicate absorption, SAM2-track fragmentation, and identity-switch
+rates. These are label-free health checks: they cannot prove that two masks
+belong to the same physical object. Use evidence inspection or annotated object
+identities before treating a low entity count as success.
+
 For an already exported HM3D scene, run the new stages explicitly:
 
 ```bash
