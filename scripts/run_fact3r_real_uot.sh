@@ -43,6 +43,7 @@ min_component_pixels="20"
 
 usage() {
     echo "Usage: $0 --video VIDEO [options]"
+    echo "       $0 --output RUN_DIR [options]   # reuse a prepared frame export"
     echo
     echo "  --query 'a chair'          run one fast query after mapping"
     echo "  --sample-fps FPS           processed video rate (default: 2)"
@@ -190,16 +191,22 @@ if [[ "$ultra_fast_preset" == "true" ]]; then
     min_component_pixels="20"
 fi
 
-if [[ -z "$video" || ! -f "$video" ]]; then
-    echo "--video must point to an existing video file" >&2
+if [[ -z "$video" && -z "$output" ]]; then
+    echo "--video is required unless --output holds a prepared frames directory" >&2
     exit 2
 fi
-video_parent=$(cd -- "$(dirname -- "$video")" && pwd)
-video="$video_parent/$(basename -- "$video")"
-if [[ -z "$name" ]]; then
-    name=$(basename -- "$video")
-    name=${name%.*}
-    name=${name//[^[:alnum:]._-]/-}
+if [[ -n "$video" ]]; then
+    if [[ ! -f "$video" ]]; then
+        echo "--video must point to an existing video file" >&2
+        exit 2
+    fi
+    video_parent=$(cd -- "$(dirname -- "$video")" && pwd)
+    video="$video_parent/$(basename -- "$video")"
+    if [[ -z "$name" ]]; then
+        name=$(basename -- "$video")
+        name=${name%.*}
+        name=${name//[^[:alnum:]._-]/-}
+    fi
 fi
 if [[ -z "$output" ]]; then
     output="$repository_root/logs/fact3r_real_uot/$name"
@@ -214,6 +221,25 @@ fi
 sam2_python=(conda run -n "$sam2_environment" python3)
 
 frames="$output/frames"
+# Frames can come from a source other than video sampling -- a rendered habitat
+# tour, for instance -- in which case the export already exists.
+if [[ -z "$video" && ! -f "$frames/manifest.json" ]]; then
+    echo "no --video given and no prepared frame export at $frames" >&2
+    exit 2
+fi
+# A prepared export was sampled by whoever built it, not by --sample-fps here.
+# Reading the rate back matters: the discovery period and the real-time factor
+# are both computed from it, so keeping the default would silently misreport
+# both -- an export at 1.25 FPS scored against an assumed 2 FPS reads 0.303x
+# real time when it is really 0.485x.
+if [[ -z "$video" && -f "$frames/manifest.json" ]]; then
+    manifest_fps=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('sample_fps') or '')" \
+        "$frames/manifest.json" 2>/dev/null || true)
+    if [[ -n "$manifest_fps" ]]; then
+        echo "prepared frame export was sampled at $manifest_fps FPS (was $sample_fps)"
+        sample_fps="$manifest_fps"
+    fi
+fi
 proposals="$output/sam2_proposals"
 tracklets="$output/sam2_tracklets"
 if [[ "$semantic_backend" == "qwen" ]]; then

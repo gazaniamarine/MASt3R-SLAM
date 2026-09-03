@@ -52,13 +52,17 @@ class _FakePose:
 class _FakeFrame:
     frame_id = 0
     uimg = np.full((6, 6, 3), 0.5, dtype=np.float32)
+    # meshgrid returns a list on numpy 1.x and a tuple on 2.x; unpack so the
+    # concatenation works in either environment.
     X_canon = np.dstack(
-        np.meshgrid(
-            np.arange(6, dtype=np.float32),
-            np.arange(6, dtype=np.float32),
-            indexing="xy",
-        )
-        + (np.ones((6, 6), dtype=np.float32),)
+        [
+            *np.meshgrid(
+                np.arange(6, dtype=np.float32),
+                np.arange(6, dtype=np.float32),
+                indexing="xy",
+            ),
+            np.ones((6, 6), dtype=np.float32),
+        ]
     ).reshape(-1, 3)
     C = np.full((36, 1), 2.0, dtype=np.float32)
     T_WC = _FakePose()

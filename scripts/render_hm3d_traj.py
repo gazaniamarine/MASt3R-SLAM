@@ -106,13 +106,29 @@ def largest_island(pathfinder):
     return max(range(n), key=pathfinder.island_area)
 
 
-def sample_point(pathfinder, island):
-    return np.array(
-        pathfinder.get_random_navigable_point(island_index=island), dtype=np.float64
-    )
+def sample_point(pathfinder, island, floor_range=None, max_tries=200):
+    """A navigable point on `island`, optionally confined to one storey.
+
+    HM3D houses are multi-storey and a single navmesh island commonly spans
+    several floors joined by stairs. Fact3R's BEV is planar and its odometry
+    carries no height, so a tour that climbs stairs superimposes two storeys on
+    one grid: the upper floor's furniture is stamped onto the lower floor's free
+    space and the map fragments. Confining the tour to one storey keeps the 2D
+    assumption true instead of silently violating it.
+    """
+
+    for _ in range(max_tries):
+        point = np.array(
+            pathfinder.get_random_navigable_point(island_index=island),
+            dtype=np.float64,
+        )
+        if floor_range is None or floor_range[0] <= point[1] <= floor_range[1]:
+            return point
+    return None
 
 
-def build_polyline(pathfinder, target_length, min_leg, max_leg, island, max_tries=4000):
+def build_polyline(pathfinder, target_length, min_leg, max_leg, island,
+                   max_tries=4000, floor_range=None):
     """Chain geodesic legs between random navigable points into one polyline.
 
     min_leg is relaxed when a scene is too small or too fragmented to offer
@@ -120,7 +136,9 @@ def build_polyline(pathfinder, target_length, min_leg, max_leg, island, max_trie
     rather than a single frame. The final leg returns to the start so the
     tour closes a loop.
     """
-    start = sample_point(pathfinder, island)
+    start = sample_point(pathfinder, island, floor_range)
+    if start is None:
+        raise ValueError("no navigable point on this island within the floor range")
     polyline = [start]
     cur = start
     total = 0.0
@@ -128,9 +146,15 @@ def build_polyline(pathfinder, target_length, min_leg, max_leg, island, max_trie
     stale = 0
     while total < target_length and tries < max_tries:
         tries += 1
-        cand = sample_point(pathfinder, island)
+        cand = sample_point(pathfinder, island, floor_range)
         pts = geodesic_path(pathfinder, cur, cand)
         if pts is None or len(pts) < 2:
+            stale += 1
+        elif floor_range is not None and not all(
+            floor_range[0] <= point[1] <= floor_range[1] for point in pts
+        ):
+            # Both ends are on this storey but the route between them is not:
+            # the path goes up the stairs and back down. Reject the whole leg.
             stale += 1
         else:
             leg = float(np.sum(np.linalg.norm(np.diff(np.stack(pts), axis=0), axis=1)))
@@ -148,7 +172,10 @@ def build_polyline(pathfinder, target_length, min_leg, max_leg, island, max_trie
 
     # Close the loop so global optimisation has a real loop closure to find.
     pts = geodesic_path(pathfinder, cur, start)
-    if pts is not None and len(pts) >= 2:
+    if pts is not None and len(pts) >= 2 and (
+        floor_range is None
+        or all(floor_range[0] <= point[1] <= floor_range[1] for point in pts)
+    ):
         polyline.extend(pts[1:])
 
     return np.stack(polyline), total
@@ -263,7 +290,8 @@ def render_scene(scene, dataset_config, out_dir, args):
         for attempt in range(args.max_attempts):
             sim.pathfinder.seed(args.seed + attempt)
             polyline, tour_len = build_polyline(
-                sim.pathfinder, target_length, args.min_leg, args.max_leg, island
+                sim.pathfinder, target_length, args.min_leg, args.max_leg, island,
+                floor_range=args.floor_range
             )
             positions = resample(polyline, args.step)
             frames = build_poses(positions, math.radians(args.max_turn_deg))
@@ -368,6 +396,15 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-attempts", type=int, default=6, help="Tour resamples allowed to avoid mesh holes.")
     p.add_argument("--max-dark", type=float, default=0.05, help="Max fraction of probe views into empty space.")
+    p.add_argument(
+        "--floor-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN_Y", "MAX_Y"),
+        default=None,
+        help="confine the tour to navmesh points whose habitat y lies in this "
+             "range, so a multi-storey island yields a single-storey tour",
+    )
     p.add_argument("--list-scenes", action="store_true")
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()

@@ -41,6 +41,31 @@ def _sidecar(stem: Path, suffix: str) -> Path:
     return Path(f"{stem}{suffix}")
 
 
+def _load_precomputed_depth(directory: Path, frame_id: int, shape) -> np.ndarray:
+    """Load one depth map and centre-crop it to the keyframe's shape.
+
+    Simulator depth is rendered at the original square resolution, while the
+    saved frames are the MASt3R centre crop, so the same crop is applied here
+    rather than resampling, which would blur depth discontinuities.
+    """
+
+    path = Path(directory) / f"depth_{frame_id:06d}.npy"
+    if not path.is_file():
+        raise FileNotFoundError(f"no precomputed depth for frame {frame_id}: {path}")
+    depth = np.load(path).astype(np.float32)
+    height, width = shape
+    if depth.shape[:2] != (height, width):
+        top = (depth.shape[0] - height) // 2
+        left = (depth.shape[1] - width) // 2
+        if top < 0 or left < 0:
+            raise ValueError(
+                f"precomputed depth {depth.shape[:2]} is smaller than the "
+                f"keyframe {(height, width)}"
+            )
+        depth = depth[top:top + height, left:left + width]
+    return depth
+
+
 def _load_odometry(path: Path) -> tuple[np.ndarray, ...]:
     timestamp, x, y, theta, velocity = [], [], [], [], []
     with path.open(newline="", encoding="utf-8") as handle:
@@ -386,6 +411,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--stationary-skip", type=float, default=0.0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--depth-model", default=METRIC_CHECKPOINT)
+    parser.add_argument(
+        "--depth-dir",
+        type=Path,
+        help="directory of precomputed depth_<frame_id>.npy maps, used instead "
+             "of running the monocular model (diagnostic upper bound)",
+    )
     return parser.parse_args()
 
 
@@ -475,16 +506,23 @@ def main() -> None:
     )
 
     import cv2
-    import torch
-    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
-    device = f"cuda:{args.device}" if str(args.device).isdigit() else str(args.device)
-    model_dtype = torch.float16 if device.startswith("cuda") else torch.float32
-    print(f"loading metric depth model {args.depth_model}...")
-    processor = AutoImageProcessor.from_pretrained(args.depth_model)
-    model = AutoModelForDepthEstimation.from_pretrained(args.depth_model).to(
-        device, model_dtype
-    ).eval()
+    # With --depth-dir the monocular model is never called, so it is not
+    # imported either: transformers lives in a different environment from
+    # scipy/plyfile, and loading it here would confine the precomputed-depth
+    # path to the one environment that has both.
+    processor = model = device = model_dtype = None
+    if args.depth_dir is None:
+        import torch
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+        device = f"cuda:{args.device}" if str(args.device).isdigit() else str(args.device)
+        model_dtype = torch.float16 if device.startswith("cuda") else torch.float32
+        print(f"loading metric depth model {args.depth_model}...")
+        processor = AutoImageProcessor.from_pretrained(args.depth_model)
+        model = AutoModelForDepthEstimation.from_pretrained(args.depth_model).to(
+            device, model_dtype
+        ).eval()
 
     cloud_chunks: list[np.ndarray] = []
     cloud_keyframes: list[np.ndarray] = []
@@ -501,9 +539,19 @@ def main() -> None:
         if not pending:
             return
         bgr_frames = [item[2] for item in pending]
-        depths = _predict_depth_batch(
-            processor, model, bgr_frames, device=device, dtype=model_dtype
-        )
+        if args.depth_dir is not None:
+            # Precomputed depth, one .npy per keyframe index. Used to separate
+            # "the map is bad" from "the retrieval is bad": with simulator depth
+            # the geometry is exact, so anything still failing is not the depth.
+            depths = [
+                _load_precomputed_depth(args.depth_dir, int(item[0].frame_id),
+                                        bgr.shape[:2])
+                for item, bgr in zip(pending, bgr_frames)
+            ]
+        else:
+            depths = _predict_depth_batch(
+                processor, model, bgr_frames, device=device, dtype=model_dtype
+            )
         for (keyframe, timestamp, _), depth in zip(pending, depths):
             depth = np.asarray(depth, dtype=np.float32) * args.scale
             rover_x = float(np.interp(timestamp, odom_t, odom_x))
@@ -632,9 +680,10 @@ def main() -> None:
                 f"{sum(map(len, semantic_chunks)):,} semantic points"
             )
     flush()
-    del model
-    if device.startswith("cuda"):
-        torch.cuda.empty_cache()
+    if model is not None:
+        del model
+        if device.startswith("cuda"):
+            torch.cuda.empty_cache()
     if not cloud_chunks or not poses:
         raise ValueError("no depth points were produced; check odometry/time offset")
 

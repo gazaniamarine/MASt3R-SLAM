@@ -40,6 +40,7 @@ REPOSITORY_ROOT = PROJECT_ROOT.parent
 DEFAULT_PLANNER_ROOT = REPOSITORY_ROOT / "thirdparty" / "safediffuser"
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from fact3r.experiments.vlnce_return import look_at_yaw  # noqa: E402
 from fact3r.semantics.semantic_goal import nearest_cell_in  # noqa: E402
 
 
@@ -298,6 +299,9 @@ def main() -> None:
         "centroid_navigable": centroid_navigable,
         "centroid_clearance_m": centroid_clearance,
         "goal_yx": goal_yx,
+        # Arrive looking at the entity, not merely standing near it -- the
+        # camera has to re-observe the object for the return to mean anything.
+        "goal_yaw": look_at_yaw(goal_yx, centroid_yx),
         "goal_cell_rc": [goal_row, goal_col],
         "goal_clearance_m": float(hm3d_map.clearance[goal_row, goal_col]),
         "projection_distance_m": moved_metres,

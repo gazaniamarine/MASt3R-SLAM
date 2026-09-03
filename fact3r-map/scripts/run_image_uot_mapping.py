@@ -117,6 +117,7 @@ def main() -> None:
     committed_track_entities: dict[str, str] = {}
     total_matches = 0
     total_births = 0
+    empty_frames = 0
     transport_config = ResidualTransportConfig(
         min_retained_ratio=0.15,
         min_conditional_probability=0.45,
@@ -126,6 +127,14 @@ def main() -> None:
         frame_id = int(run_entry["frame_id"])
         proposals, masks = _load_proposal_frame(args.proposals, run_entry)
         proposal_ids = [str(item["proposal_id"]) for item in proposals]
+        if not proposal_ids:
+            # SAM2 returns nothing for a featureless view -- a blank wall during
+            # an in-place turn, for instance. There is nothing to associate, but
+            # the frame still advances the temporal cue, so record it and move on
+            # rather than stacking an empty list.
+            empty_frames += 1
+            previous_frame_id = frame_id
+            continue
         vectors = np.stack([embedding_by_proposal[item] for item in proposal_ids])
         observations = {
             item.proposal_id: item
@@ -320,6 +329,7 @@ def main() -> None:
         "source_mast3r_pair_matches": str((args.mast3r_matches / "manifest.json").resolve()),
         "appearance_model": appearance_manifest.get("model"),
         "association_cues": list(enabled_cues),
+        "frames_without_proposals": empty_frames,
         "association_config": {
             "cue_weights": cue_weights,
             "min_sam2_iou": None if not np.isfinite(min_sam2_iou) else min_sam2_iou,
@@ -346,6 +356,11 @@ def main() -> None:
     }
     path = args.output / "manifest.json"
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    if empty_frames:
+        print(
+            f"{empty_frames} frame(s) carried no SAM2 proposals and were skipped; "
+            "a large share means the tour spends time facing featureless geometry"
+        )
     print(f"Wrote reconstruction-free image UOT map to {path}")
 
 

@@ -87,7 +87,17 @@ def _rover_track(stem: Path, floor: dict[str, np.ndarray]) -> list[list[float]] 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map", type=Path, required=True, help="stem or _semantic.json")
-    parser.add_argument("--query", required=True)
+    parser.add_argument(
+        "--query",
+        required=False,
+        default="",
+        help="text goal; omit when giving --image",
+    )
+    parser.add_argument(
+        "--image",
+        type=Path,
+        help="image goal, scored against the stored observation embeddings",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="0")
     parser.add_argument("--device-map", default="auto")
@@ -95,6 +105,14 @@ def main() -> None:
         "--dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto"
     )
     parser.add_argument("--top-k", type=int, default=5, help="candidates reported")
+    parser.add_argument(
+        "--observed-between",
+        type=int,
+        nargs=2,
+        metavar=("FIRST", "LAST"),
+        help="keep only entities seen in this keyframe window; use the arrival "
+             "window of the leg whose instruction named the landmark",
+    )
     parser.add_argument("--top-views", type=int, default=3)
     parser.add_argument("--min-score", type=float)
     parser.add_argument("--exact-query", action="store_true")
@@ -116,6 +134,8 @@ def main() -> None:
         "projection stage will reject the winner; for retrieval evaluation only.",
     )
     args = parser.parse_args()
+    if args.image is None and not args.query:
+        parser.error("give either --query or --image")
     if args.top_k <= 0 or args.top_views <= 0:
         raise ValueError("top-k and top-views must be positive")
 
@@ -152,13 +172,30 @@ def main() -> None:
         encoder = Siglip2Encoder(str(index_manifest["model"]), device=args.device)
     load_seconds = perf_counter() - started
 
-    prompts = query_module._query_prompts(args.query, ensemble=not args.exact_query)
-    print("query prompts: " + " | ".join(prompts))
-    scores, _, _ = query_module._fuse_prompt_scores(
-        embeddings,
-        encoder.encode_text(prompts),
-        agreement_prompts=1 if args.exact_query else 2,
-    )
+    if args.image is not None:
+        # An image goal lands in the same embedding space as the stored mask
+        # observations, so it is scored by plain cosine similarity rather than
+        # through the text prompt ensemble.
+        from PIL import Image as PILImage
+
+        goal_image = PILImage.open(args.image).convert("RGB")
+        vector = np.asarray(encoder.encode_images([goal_image]), dtype=np.float32)[0]
+        norm = float(np.linalg.norm(vector))
+        if norm <= 0.0:
+            raise SystemExit(f"image goal produced a zero embedding: {args.image}")
+        scores = np.asarray(embeddings, dtype=np.float32) @ (vector / norm)
+        # An image goal has no prompt ensemble; the request records the image
+        # it was matched against instead.
+        prompts = []
+        print(f"image goal: {args.image}")
+    else:
+        prompts = query_module._query_prompts(args.query, ensemble=not args.exact_query)
+        print("query prompts: " + " | ".join(prompts))
+        scores, _, _ = query_module._fuse_prompt_scores(
+            embeddings,
+            encoder.encode_text(prompts),
+            agreement_prompts=1 if args.exact_query else 2,
+        )
 
     group_metadata = {str(item["group_id"]): item for item in map_manifest["groups"]}
     cell_counts = group_cell_counts(semantic_ids, map_manifest["groups"])
@@ -170,6 +207,30 @@ def main() -> None:
         f"on-map filter: {len(candidates)} of {len(group_metadata)} entities hold "
         f"a BEV cell; {dropped} dropped"
     )
+    if args.observed_between is not None:
+        # "stop near the X" names an object at the end of that leg, so the only
+        # honest candidates are entities the agent actually saw as it arrived
+        # there. Without this a query like "doorway" ranks a doorway from a
+        # different room first, and the score gap is far too small to fix it.
+        first, last = args.observed_between
+        seen_in_window = set()
+        for observation in index_manifest["observations"]:
+            entity = observation.get("entity_id")
+            if entity is None:
+                continue
+            if first <= int(observation["frame_id"]) <= last:
+                seen_in_window.add(str(entity))
+        before = len(candidates)
+        candidates = candidates & seen_in_window
+        print(
+            f"arrival-window filter [{first}, {last}]: {len(candidates)} of "
+            f"{before} entities were observed there"
+        )
+        if not candidates:
+            raise SystemExit(
+                f"no mapped entity was observed in keyframes {first}-{last}; "
+                "widen --observed-between or drop it"
+            )
     if not candidates:
         raise SystemExit(
             "no entity in this map holds a BEV cell -- nothing can be located. "
@@ -269,6 +330,7 @@ def main() -> None:
         "format": "fact3r-semantic-goal-request",
         "version": 1,
         "query": args.query,
+        "query_image": str(Path(args.image).resolve()) if args.image else None,
         "query_prompts": prompts,
         "source_map": str(map_path.resolve()),
         "grid_file": str(grid_path.resolve()),
