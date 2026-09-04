@@ -1,5 +1,8 @@
 # Fact3R-Map
 
+For the currently recommended real-world configuration and exact continuation
+commands, start with [`README_WORKING_PIPELINE.md`](README_WORKING_PIPELINE.md).
+
 **MASt3R-grounded, open-vocabulary semantic mapping with persistent 3D entities and unbalanced optimal-transport association**
 
 ## 1. Project summary
