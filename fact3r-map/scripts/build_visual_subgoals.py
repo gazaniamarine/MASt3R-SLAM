@@ -120,6 +120,13 @@ def main():
     p.add_argument('--heading-tolerance-degrees', type=float, default=45.)
     p.add_argument('--landmark-radius', type=float, default=3.)
     p.add_argument('--timestamp-tolerance', type=float, default=.05)
+    p.add_argument('--request', type=Path,
+                    help="goal_request.json this route was resolved for -- when given, a "
+                         "subgoal within --landmark-radius of the query's own winning "
+                         "entity shows THAT entity as evidence instead of whichever "
+                         "pose-matched observation happens to score best on distance/"
+                         "heading alone, which is rarely the thing actually being "
+                         "navigated to")
     p.add_argument('--captioner', choices=['none', 'smolvlm'], default='none')
     p.add_argument('--model', default='HuggingFaceTB/SmolVLM-256M-Instruct')
     p.add_argument('--device', default='cuda:0')
@@ -163,6 +170,9 @@ def main():
         rr, cc = np.nonzero(ids == int(group['semantic_id']))
         if len(rr):
             entity_positions[str(group['group_id'])] = origin + resolution * np.array([cc.mean() + .5, rr.mean() + .5])
+    target_entity_id = None
+    if args.request:
+        target_entity_id = str(json.loads(args.request.read_text())['winner']['group_id'])
     posed = []
     if trajectory is not None:
         for obs in index['observations']:
@@ -179,13 +189,30 @@ def main():
         approach = min(approach, b - 1)
         direction = route[b] - route[approach]
         heading = float(np.arctan2(direction[1], direction[0]))
+        is_final = b == len(route) - 1
         candidates = []
         for obs, xy, yaw in posed:
+            is_target = target_entity_id is not None and str(obs['group_id']) == target_entity_id
             distance = float(np.linalg.norm(xy - route[approach]))
             angle = abs(wrap(yaw - heading))
             landmark_distance = np.linalg.norm(entity_positions[str(obs['group_id'])] - route[b])
-            if distance <= args.approach_radius and angle <= np.deg2rad(args.heading_tolerance_degrees) and landmark_distance <= args.landmark_radius:
+            in_range = (distance <= args.approach_radius
+                        and angle <= np.deg2rad(args.heading_tolerance_degrees)
+                        and landmark_distance <= args.landmark_radius)
+            # The target's own footprint is exactly why the goal needed a
+            # navigability snap in the first place -- it can legitimately sit
+            # past --approach-radius/--landmark-radius of the arrival waypoint
+            # (a snap of several metres is normal, see project_semantic_goal.py),
+            # so the radius gate is only right for *other* opportunistic
+            # landmarks. Only the final "stop" subgoal gets this exemption --
+            # forcing the target onto an earlier turn/continue waypoint it is
+            # nowhere near would misdirect, not help.
+            if in_range or (is_target and is_final):
                 score = distance / args.approach_radius + angle / np.pi - .1 * float(obs.get('proposal_score', 0))
+                # Always prefer the thing this route was actually resolved for
+                # over an incidentally closer/higher-scoring bystander entity.
+                if is_target:
+                    score -= 1000.
                 candidates.append((score, obs))
         action = 'stop' if b == len(route) - 1 else ('turn_left' if turns[b] >= np.deg2rad(args.turn_degrees) else 'turn_right' if turns[b] <= -np.deg2rad(args.turn_degrees) else 'continue')
         instruction = f'Follow the planned path for {arc[b] - arc[a]:.1f} metres. At the waypoint, {action.replace("_", " ")}.'
