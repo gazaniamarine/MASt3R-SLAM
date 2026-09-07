@@ -206,6 +206,10 @@ Do not delete these paths; retain them for ablation experiments.
 
 ## 9. What to improve next
 
+The initial route-to-visual-subgoal adapter is now available. See
+[VISUAL_SUBGOALS.md](VISUAL_SUBGOALS.md) for saved A* path inputs, evidence
+alignment, optional SmolVLM captions, and the navigation handoff JSON.
+
 Work in this order:
 
 1. Measure top-K retrieval recall on a small annotated real-video query set.
