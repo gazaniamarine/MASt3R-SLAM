@@ -81,6 +81,33 @@ def _query_module():
     return module
 
 
+def _rover_track(stem: Path, floor: dict[str, np.ndarray]) -> list[list[float]] | None:
+    """The camera trace from the fuse stage, in the grid's plane frame.
+
+    Identical to `resolve_semantic_goal.py`'s own `_rover_track`; duplicated
+    rather than imported since it is a private helper there, not part of a
+    shared module. Without this, `--start-from-track` downstream in
+    `project_semantic_goal.py` has nothing to read and every route starts
+    from a seeded-random free-space point instead of the rover's real pose.
+    """
+
+    path = Path(f"{stem}.txt")
+    if not path.exists():
+        return None
+    points = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        points.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    if not points:
+        return None
+    relative = np.asarray(points, dtype=np.float64) - floor["origin"]
+    plane_x = relative @ floor["u"]
+    plane_y = relative @ floor["v"]
+    return np.stack([plane_y, plane_x], axis=1).tolist()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map", type=Path, required=True, help="stem or _semantic.json")
@@ -162,6 +189,7 @@ def main() -> None:
     map_manifest = json.loads(map_path.read_text(encoding="utf-8"))
     if map_manifest.get("format") != "fact3r-depth-semantic-bev":
         raise SystemExit(f"unsupported semantic BEV: {map_path}")
+    stem = map_path.parent / map_path.name.replace("_semantic.json", "")
 
     grid_path = map_path.parent / str(map_manifest["grid_file"])
     with np.load(grid_path, allow_pickle=False) as payload:
@@ -170,6 +198,11 @@ def main() -> None:
         semantic_confidence = np.array(payload["semantic_confidence"], copy=True)
         origin_xy = np.array(payload["origin_xy"], copy=True)
         resolution = float(payload["resolution"])
+        floor = {
+            "origin": np.array(payload["floor_origin"], copy=True),
+            "u": np.array(payload["floor_u"], copy=True),
+            "v": np.array(payload["floor_v"], copy=True),
+        }
     groups = list(map_manifest["groups"])
 
     # Stage 1: SigLIP narrows thousands of entities to a handful, exactly as
@@ -284,6 +317,8 @@ def main() -> None:
     candidate["best_frame_id"] = int(observation["frame_id"])
     candidate["rank"] = 1
 
+    track = _rover_track(stem, floor)
+
     request = {
         "format": "fact3r-semantic-goal-request",
         "version": 1,
@@ -296,6 +331,7 @@ def main() -> None:
         "candidate_entities": len(markers),
         "candidates": [candidate],
         "winner": candidate,
+        "rover_track_yx": track,
         "rendered_map": str(rendered_map.resolve()),
         "vlm": {
             "model": pointer.model_name,
