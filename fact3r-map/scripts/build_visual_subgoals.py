@@ -143,7 +143,11 @@ def main():
     cells = np.floor((route - origin) / resolution).astype(int)
     if np.any(cells < 0) or np.any(cells[:, 0] >= ids.shape[1]) or np.any(cells[:, 1] >= ids.shape[0]):
         raise ValueError('Route is outside this BEV: check coordinate order and map provenance')
-    if np.any(occupancy[cells[:, 1], cells[:, 0]] != 0):
+    # occupancy is a ROS-style probability grid (-1 unknown, 0..64 free, >=65
+    # occupied), not binary -- same threshold build_depth_semantic_bev.py's
+    # own renderer and fact3r.vlm_nav.bev_pointing use.
+    cell_occupancy = occupancy[cells[:, 1], cells[:, 0]]
+    if np.any(cell_occupancy < 0) or np.any(cell_occupancy >= 65):
         raise ValueError('Route vertices enter occupied/unknown cells; validate the planner route first')
     source_index = Path(manifest['source_observation_index'])
     if source_index.is_dir():
