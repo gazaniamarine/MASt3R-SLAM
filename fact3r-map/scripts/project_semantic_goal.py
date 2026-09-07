@@ -279,6 +279,8 @@ def main() -> None:
         np.linalg.norm(cells_yx - np.asarray(goal_yx), axis=1).min()
     )
 
+    in_largest_component = bool(planner.largest_component(navigable)[goal_row, goal_col])
+
     result = {
         "format": "fact3r-semantic-goal",
         "version": 1,
@@ -310,12 +312,21 @@ def main() -> None:
         "component_source": component_source,
         "component_cells": int(component.sum()),
         "component_area_m2": float(component.sum() * hm3d_map.res ** 2),
-        "in_largest_component": bool(
-            planner.largest_component(navigable)[goal_row, goal_col]
-        ),
+        "in_largest_component": in_largest_component,
         "start_yx": start_yx,
         "start": start_report,
     }
+    if not in_largest_component:
+        largest_cells = int(planner.largest_component(navigable).sum())
+        result["warning"] = (
+            f"goal is in a {int(component.sum())}-cell pocket, not the "
+            f"{largest_cells}-cell largest navigable component -- this is the "
+            "nearest point THIS pocket has to the entity, not a point actually "
+            "near it. No path exists between them on the current map; a plan "
+            "between start and this goal only 'works' because both ends were "
+            "silently confined to the same isolated pocket."
+        )
+        print(f"  WARNING: {result['warning']}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(f"  {reason}")
