@@ -28,12 +28,14 @@ if has_cuda:
     sources.append("mast3r_slam/backend/src/matching_kernels.cu")
     extra_compile_args["nvcc"] = [
         "-O3",
-        "-gencode=arch=compute_60,code=sm_60",
-        "-gencode=arch=compute_61,code=sm_61",
-        "-gencode=arch=compute_70,code=sm_70",
         "-gencode=arch=compute_75,code=sm_75",
         "-gencode=arch=compute_80,code=sm_80",
         "-gencode=arch=compute_86,code=sm_86",
+        "-gencode=arch=compute_89,code=sm_89",
+        "-gencode=arch=compute_90,code=sm_90",
+        # Blackwell (RTX PRO 6000 / RTX 50xx) — requires CUDA >= 12.8
+        "-gencode=arch=compute_120,code=sm_120",
+        "-gencode=arch=compute_120,code=compute_120",
     ]
     ext_modules = [
         CUDAExtension(

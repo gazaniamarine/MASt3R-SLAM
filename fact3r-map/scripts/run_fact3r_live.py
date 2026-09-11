@@ -247,23 +247,30 @@ def _preview(
     import cv2
 
     canvas = rgb.astype(np.float32)
+    boxes = []
     for proposal in proposals:
         assignment = assignments[proposal.proposal_id]
         colour = _colour(assignment.entity_id)
         canvas[proposal.mask] = 0.55 * canvas[proposal.mask] + 0.45 * colour
         if proposal.bounding_box_xyxy is not None:
-            x0, y0, x1, y1 = proposal.bounding_box_xyxy.astype(int)
-            cv2.rectangle(canvas, (x0, y0), (x1, y1), colour.tolist(), 1)
-            cv2.putText(
-                canvas,
-                assignment.entity_id.replace("image-entity-", "E"),
-                (x0, max(12, y0 - 3)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                colour.tolist(),
-                1,
-                cv2.LINE_AA,
-            )
+            boxes.append((proposal.bounding_box_xyxy.astype(int), colour, assignment.entity_id))
+    # cv2.rectangle/putText need a CV_8U image (OpenCV 5 enforces this where
+    # older versions silently tolerated float32) -- composite the masks in
+    # float first, then draw everything else on the converted uint8 canvas.
+    canvas = np.clip(canvas, 0, 255).astype(np.uint8)
+    for (x0, y0, x1, y1), colour, entity_id in boxes:
+        colour_u8 = colour.astype(np.uint8).tolist()
+        cv2.rectangle(canvas, (x0, y0), (x1, y1), colour_u8, 1)
+        cv2.putText(
+            canvas,
+            entity_id.replace("image-entity-", "E"),
+            (x0, max(12, y0 - 3)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            colour_u8,
+            1,
+            cv2.LINE_AA,
+        )
     cv2.putText(
         canvas,
         f"frame={frame_id} processed={processed_fps:.2f} FPS target={target_fps:g}",
@@ -274,7 +281,7 @@ def _preview(
         1,
         cv2.LINE_AA,
     )
-    return np.clip(canvas, 0, 255).astype(np.uint8)
+    return canvas
 
 
 def _write_artifacts(
